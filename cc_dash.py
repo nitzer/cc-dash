@@ -15,6 +15,7 @@ Uso:    cc-dash [--once] [-a CUENTA]
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import subprocess
@@ -41,7 +42,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -707,6 +708,12 @@ class Canvas:
                 self.ch[y][x + i] = c
                 self.st[y][x + i] = style
 
+    def tint(self, cells, style):
+        """Cambia el color de celdas ya dibujadas sin tocar sus caracteres."""
+        for x, y in cells:
+            if 0 <= y < self.h and 0 <= x < self.w:
+                self.st[y][x] = style
+
     def box(self, x, y, w, h, style, heavy=False):
         tl, tr, bl, br, hz, vt = "┏┓┗┛━┃" if heavy else "┌┐└┘─│"
         self.put(x, y, tl + hz * (w - 2) + tr, style)
@@ -747,6 +754,18 @@ class Canvas:
         return out
 
 
+def blend(a, b, k):
+    """Color intermedio entre dos #rrggbb; k=0 da a, k=1 da b."""
+    ca, cb = (int(a[i:i + 2], 16) for i in (1, 3, 5)), (int(b[i:i + 2], 16) for i in (1, 3, 5))
+    return "#" + "".join(f"{round(x + (y - x) * k):02x}" for x, y in zip(ca, cb))
+
+
+def breath(color, now, offset=0.0):
+    """Color que "respira" entre el tono de las líneas y `color`."""
+    k = (1 - math.cos(2 * math.pi * (now + offset) / 2.4)) / 2
+    return blend(LINE, color, 0.15 + 0.85 * k)
+
+
 def hpath(x0, x1, y):
     step = 1 if x1 >= x0 else -1
     return [(x, y) for x in range(x0, x1 + step, step)]
@@ -775,7 +794,7 @@ def diagram(store, s, w, compact, now, sel=None):
         gap = 6
         cv.put(aw, 2, "┄" * (gap - 1) + "▶", ast if s.advisor else LINE)
         if hot:
-            cv.put(aw + phase % (gap - 1), 2, "●", f"bold {ADVISOR}")
+            cv.tint(hpath(aw, aw + gap - 1, 2), f"bold {breath(ADVISOR, now)}")
         lx = aw + gap
     else:
         lx = 0
@@ -819,6 +838,7 @@ def diagram(store, s, w, compact, now, sel=None):
     if not compact:
         cv.branch(15, xs, btrunk, LINE, down=False)
         cv.put(btrunk, 16, "▼", LINE)
+    glow = []
     for i in range(slots):
         x = i * (sw + sgap)
         v = shown[i] if i < len(shown) else None
@@ -858,13 +878,12 @@ def diagram(store, s, w, compact, now, sel=None):
         stats += f" · {v['tools']} tools" if v["tools"] else ""
         cv.put(x + 2, 12, trunc(stats, inner), SWARM if live else DIM)
         if live:
-            path = [(trunk, 5)] + hpath(trunk, xs[i], 6) + [(xs[i], 7)]
-            px, py = path[(phase + i * 3) % len(path)]
-            cv.put(px, py, "●", f"bold {SWARM}")
+            glow.append(([(trunk, 5)] + hpath(trunk, xs[i], 6) + [(xs[i], 7)], SWARM))
         elif not compact and v["end"] and now - v["end"] < 8:
-            path = [(xs[i], 14)] + hpath(xs[i], btrunk, 15) + [(btrunk, 16)]
-            px, py = path[phase % len(path)]
-            cv.put(px, py, "●", f"bold {LEAD}")
+            glow.append(([(xs[i], 14)] + hpath(xs[i], btrunk, 15) + [(btrunk, 16)], LEAD))
+    # los caminos activos "respiran"; se tiñen al final para que no los pise otra tarjeta
+    for cells, color in glow:
+        cv.tint(cells, f"bold {breath(color, now)}")
 
     # vuelta al lead
     if not compact:
