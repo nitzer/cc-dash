@@ -6,7 +6,8 @@ sessions/*.json (sesiones abiertas) y projects/**/*.jsonl (modelo,
 herramientas, subagentes, tokens). Solo lectura: no toca ni envía nada.
 
 Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto · q sale
-        p abre el prompt de un subagente (←/→ subagente · ↑/↓ desplaza · p cierra)
+        ←/→ selecciona un subagente · r su última respuesta · p su prompt
+        AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
@@ -15,11 +16,13 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
 import time
 import tomllib
+from collections import Counter
 from datetime import datetime
 
 from rich import box
@@ -38,7 +41,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -102,6 +105,19 @@ def ktok(n):
 
 def short_model(m):
     return (m or "?").replace("claude-", "")
+
+
+def short_tool(name):
+    """mcp__servidor__herramienta -> herramienta"""
+    return name.split("__")[-1] if name.startswith("mcp__") else name
+
+
+def block_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
 
 
 def tool_label(name, inp):
@@ -296,27 +312,36 @@ class Session:
         self.account = account
         self.title = ""
         self.cwd = ""
+        self.branch = ""
         self.model = ""
         self.advisor = ""
         self.effort = ""
+        self.perm = ""
         self.out_tokens = 0
         self.ctx = 0
+        self.cache_pct = None
         self.cost = None
+        self.lines = None       # (añadidas, quitadas)
         self.turns = 0
+        self.turn_last = 0      # ms
+        self.turn_total = 0     # ms
         self.tools = 0
+        self.errors = 0
+        self.tool_counts = Counter()
+        self.skills = Counter()
+        self.mcp = Counter()
+        self.hooks = Counter()
         self.advisor_calls = 0
         self.advisor_last = 0.0
         self.last = 0.0
         self.pending = {}   # tool_use_id -> (name, label, ts)
-        self.agents = []    # {id, type, desc, model, start, end}
-        self.requests = set()
+        self.agents = []    # lanzamientos vistos en el transcript principal
+        self.side = {}      # agentId -> actividad leída del transcript del subagente
+        self.requests = {}  # requestId -> tokens de salida ya contados
 
-    def sorted_agents(self):
-        """En marcha primero, luego los más recientes."""
-        return sorted(self.agents, key=lambda a: (a["end"] is not None, -(a["start"] or 0)))
-
-    def running_agents(self):
-        return [a for a in self.agents if a["end"] is None]
+    def side_info(self, aid):
+        return self.side.setdefault(aid, {"tools": 0, "tool": None, "text": "", "final": "",
+                                          "out": 0, "done": None, "model": ""})
 
 
 class Store:
@@ -328,6 +353,9 @@ class Store:
         self.offsets = {}
         self.files = []     # (ruta, nombre de cuenta)
         self.live = {}      # sid -> info de ~/.claude/sessions
+        self.aid_of = {}    # tool_use_id del lanzamiento -> agentId (de *.meta.json)
+        self.agent_type = {}
+        self.meta_seen = set()
         self.t_glob = self.t_live = self.t_tail = 0.0
 
     # -- lectura incremental de transcripts --
@@ -336,6 +364,9 @@ class Store:
             self.files = [(path, acct.name) for acct in self.accounts
                           for path in glob.glob(os.path.join(acct.projects, "**", "*.jsonl"), recursive=True)]
             self.t_glob = now
+            for path, _ in self.files:
+                if os.sep + "subagents" + os.sep in path and path not in self.meta_seen:
+                    self.read_meta(path)
         if now - self.t_live > 1:
             self.read_live()
             self.t_live = now
@@ -347,6 +378,19 @@ class Store:
             if grew:
                 self.log.sort(key=lambda e: e[0])
                 del self.log[:-400]
+
+    def read_meta(self, path):
+        """agent-<id>.meta.json enlaza el transcript del subagente con su lanzamiento."""
+        aid = os.path.basename(path)[len("agent-"):-len(".jsonl")]
+        try:
+            with open(path[:-len(".jsonl")] + ".meta.json") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError):
+            return
+        self.meta_seen.add(path)
+        if meta.get("toolUseId"):
+            self.aid_of[meta["toolUseId"]] = aid
+        self.agent_type[aid] = meta.get("agentType") or ""
 
     def tail(self, path, account):
         try:
@@ -404,6 +448,28 @@ class Store:
     def event(self, ts, sid, style, tag, text):
         self.log.append((ts, sid, style, tag, text))
 
+    def count_tool(self, s, name, inp):
+        s.tools += 1
+        s.tool_counts[short_tool(name)] += 1
+        if name == "Skill" and isinstance(inp, dict) and inp.get("skill"):
+            s.skills[inp["skill"]] += 1
+        if name.startswith("mcp__"):
+            s.mcp[name.split("__")[1]] += 1
+
+    def add_usage(self, s, o, msg, side=None):
+        usage = msg.get("usage") or {}
+        rid = o.get("requestId")
+        if usage:
+            # varios registros comparten requestId y el recuento crece: se suma solo la diferencia
+            out = usage.get("output_tokens") or 0
+            delta = out - s.requests.get(rid, 0)
+            if delta > 0:
+                s.requests[rid] = out
+                s.out_tokens += delta
+                if side is not None:
+                    side["out"] += delta
+        return usage
+
     def ingest(self, o, account):
         sid = o.get("sessionId") or o.get("session_id")
         if not sid:
@@ -417,16 +483,37 @@ class Store:
             s.last = max(s.last, ts)
         if o.get("cwd"):
             s.cwd = o["cwd"]
+        if o.get("gitBranch") and o["gitBranch"] != "HEAD":
+            s.branch = o["gitBranch"]
         side = bool(o.get("isSidechain"))
         msg = o.get("message") if isinstance(o.get("message"), dict) else {}
         content = msg.get("content")
 
+        if kind == "attachment":
+            att = o.get("attachment") if isinstance(o.get("attachment"), dict) else {}
+            if att.get("type") == "hook_success" and att.get("hookEvent"):
+                s.hooks[att["hookEvent"]] += 1
+            return
+        if side and o.get("agentId"):
+            if kind == "assistant":
+                self.ingest_side(s, o["agentId"], o, msg, content, ts)
+            return
+
         if kind == "ai-title":
             s.title = o.get("aiTitle") or s.title
+        elif kind == "permission-mode":
+            s.perm = o.get("permissionMode") or s.perm
         elif kind == "cost-state":
             s.cost = o.get("totalCostUSD")
+            s.lines = (o.get("totalLinesAdded") or 0, o.get("totalLinesRemoved") or 0)
+        elif kind == "queue-operation":
+            text = o.get("content") if isinstance(o.get("content"), str) else ""
+            if o.get("operation") == "enqueue" and "<task-notification>" in text[:60]:
+                self.task_done(s, text, ts)
         elif kind == "system" and o.get("subtype") == "turn_duration" and not side:
             s.turns += 1
+            s.turn_last = o.get("durationMs") or 0
+            s.turn_total += s.turn_last
             s.pending.clear()
         elif kind == "assistant":
             if not side:
@@ -434,36 +521,35 @@ class Store:
                     s.model = msg["model"]
                 s.advisor = o.get("advisorModel") or s.advisor
                 s.effort = o.get("effort") or s.effort
-            usage = msg.get("usage") or {}
-            rid = o.get("requestId")
-            if usage and rid not in s.requests:
-                s.requests.add(rid)
-                s.out_tokens += usage.get("output_tokens") or 0
+                if o.get("attributionSkill") and o["attributionSkill"] not in s.skills:
+                    s.skills[o["attributionSkill"]] = 1
+            usage = self.add_usage(s, o, msg)
             if usage and not side:
-                s.ctx = ((usage.get("input_tokens") or 0)
-                         + (usage.get("cache_read_input_tokens") or 0)
-                         + (usage.get("cache_creation_input_tokens") or 0))
+                read = usage.get("cache_read_input_tokens") or 0
+                s.ctx = (usage.get("input_tokens") or 0) + read + (usage.get("cache_creation_input_tokens") or 0)
+                s.cache_pct = round(100 * read / s.ctx) if s.ctx else None
             for b in content if isinstance(content, list) else []:
                 if not isinstance(b, dict):
                     continue
                 name = b.get("name") or ""
                 inp = b.get("input") or {}
                 if b.get("type") == "tool_use":
-                    s.tools += 1
+                    self.count_tool(s, name, inp)
                     label = tool_label(name, inp)
                     if name in AGENT_TOOLS and not side:
                         s.agents.append({
-                            "id": b.get("id"), "start": ts, "end": None,
+                            "id": b.get("id"), "aid": None, "start": ts, "end": None,
                             "type": inp.get("subagent_type") or "general",
                             "desc": inp.get("description") or "",
                             "prompt": inp.get("prompt") or "",
                             "model": inp.get("model") or "",
+                            "result": "", "status": "",
                         })
                         self.event(ts, sid, SWARM, "Agent", f"▶ {label}")
                     else:
-                        s.pending[b.get("id")] = (name, label, ts)
+                        s.pending[b.get("id")] = (short_tool(name), label, ts)
                         self.event(ts, sid, DIM if side else TOOL,
-                                   ("↳ " if side else "") + name, label)
+                                   ("↳ " if side else "") + short_tool(name), label)
                 elif "advisor" in name.lower() or "advisor" in str(b.get("type")):
                     if b.get("type", "").endswith("tool_use"):
                         s.advisor_calls += 1
@@ -475,18 +561,69 @@ class Store:
                     s.pending.clear()
                     self.event(ts, sid, LEAD, "prompt", "› " + content)
                 return
+            result = o.get("toolUseResult") if isinstance(o.get("toolUseResult"), dict) else {}
             for b in content if isinstance(content, list) else []:
                 if not isinstance(b, dict) or b.get("type") != "tool_result":
                     continue
                 tid = b.get("tool_use_id")
+                if b.get("is_error"):
+                    s.errors += 1
                 done = s.pending.pop(tid, None)
                 if done and b.get("is_error"):
                     self.event(ts, sid, ERR, done[0], "✗ " + (done[1] or "error"))
                 for a in s.agents:
-                    if a["id"] == tid and a["end"] is None:
-                        a["end"] = ts or time.time()
-                        self.event(ts, sid, SWARM, "Agent",
-                                   f"✓ {a['desc']} ({clock(a['end'] - a['start'])})")
+                    if a["id"] != tid:
+                        continue
+                    a["aid"] = result.get("agentId") or a["aid"]
+                    if result.get("resolvedModel"):
+                        a["model"] = short_model(result["resolvedModel"])
+                    # en segundo plano el resultado solo confirma el lanzamiento
+                    if result.get("isAsync") or result.get("status") == "async_launched":
+                        break
+                    if a["end"] is None:
+                        a["result"] = block_text(b.get("content"))
+                        self.finish(s, a, ts, "error" if b.get("is_error") else "completed")
+
+    def ingest_side(self, s, aid, o, msg, content, ts):
+        """Un mensaje del propio subagente (transcript en <sesión>/subagents/)."""
+        info = s.side_info(aid)
+        if msg.get("model"):
+            info["model"] = msg["model"]
+        self.add_usage(s, o, msg, info)
+        for b in content if isinstance(content, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and (b.get("text") or "").strip():
+                info["text"] = b["text"]
+            elif b.get("type") == "tool_use":
+                name = b.get("name") or ""
+                inp = b.get("input") or {}
+                if name == "SubagentHandback":
+                    info["final"] = str(inp.get("message") or "") if isinstance(inp, dict) else ""
+                    info["done"] = ts
+                    continue
+                info["tools"] += 1
+                info["tool"] = (short_tool(name), tool_label(name, inp))
+                info["done"] = None
+                self.count_tool(s, name, inp)
+                self.event(ts, s.sid, DIM, "↳ " + (self.agent_type.get(aid) or "agente"),
+                           f"{info['tool'][0]}: {info['tool'][1]}")
+
+    def task_done(self, s, text, ts):
+        task = re.search(r"<task-id>([^<]+)</task-id>", text)
+        status = re.search(r"<status>([^<]+)</status>", text)
+        if not task:
+            return
+        for a in s.agents:
+            if (a["aid"] or self.aid_of.get(a["id"])) == task.group(1) and a["end"] is None:
+                self.finish(s, a, ts, status.group(1) if status else "completed")
+
+    def finish(self, s, a, ts, status):
+        a["end"] = ts or time.time()
+        a["status"] = status
+        ok = status == "completed"
+        self.event(ts, s.sid, SWARM if ok else ERR, "Agent",
+                   f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})")
 
     # -- vistas --
     def state(self, s):
@@ -494,6 +631,24 @@ class Store:
         if not info:
             return "ended"
         return "busy" if info.get("status") == "busy" else "idle"
+
+    def agents(self, s):
+        """Subagentes de la sesión con su actividad: en marcha primero, luego recientes."""
+        alive = self.state(s) != "ended"
+        out = []
+        for a in s.agents:
+            aid = a["aid"] or self.aid_of.get(a["id"])
+            side = s.side.get(aid) or {}
+            end = a["end"] or side.get("done")
+            out.append({
+                **a, "aid": aid, "end": end, "running": end is None and alive,
+                "tools": side.get("tools", 0), "tool": side.get("tool"), "out": side.get("out", 0),
+                "model": a["model"] or (short_model(side["model"]) if side.get("model") else ""),
+                "status": a["status"] or ("completed" if end else ""),
+                "response": (side.get("final") or a["result"] or side.get("text") or "").strip(),
+            })
+        out.sort(key=lambda v: (not v["running"], -(v["start"] or 0)))
+        return out
 
     def name(self, s):
         info = self.live.get(s.sid) or {}
@@ -537,12 +692,13 @@ class Canvas:
                 self.ch[y][x + i] = c
                 self.st[y][x + i] = style
 
-    def box(self, x, y, w, h, style):
-        self.put(x, y, "┌" + "─" * (w - 2) + "┐", style)
+    def box(self, x, y, w, h, style, heavy=False):
+        tl, tr, bl, br, hz, vt = "┏┓┗┛━┃" if heavy else "┌┐└┘─│"
+        self.put(x, y, tl + hz * (w - 2) + tr, style)
         for r in range(1, h - 1):
-            self.put(x, y + r, "│", style)
-            self.put(x + w - 1, y + r, "│", style)
-        self.put(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
+            self.put(x, y + r, vt, style)
+            self.put(x + w - 1, y + r, vt, style)
+        self.put(x, y + h - 1, bl + hz * (w - 2) + br, style)
 
     def branch(self, y, xs, trunk, style, down=True):
         """Línea horizontal que une `trunk` con las columnas `xs`.
@@ -581,8 +737,8 @@ def hpath(x0, x1, y):
     return [(x, y) for x in range(x0, x1 + step, step)]
 
 
-def diagram(store, s, w, compact, now):
-    h = 14 if compact else 20
+def diagram(store, s, w, compact, now, sel=None):
+    h = 15 if compact else 21
     cv = Canvas(w, h)
     if s is None:
         cv.put(2, 2, "sin sesiones todavía — abre Claude Code en otra terminal", DIM)
@@ -628,10 +784,11 @@ def diagram(store, s, w, compact, now):
         cv.put(lx + 2, 3, trunc(s.title or "—", inner), DIM)
 
     # subagentes
-    agents = s.sorted_agents()
-    running = s.running_agents() if state != "ended" else []
+    agents = store.agents(s)
     slots = max(MIN_SLOTS, min(len(agents), (w + 2) // (SLOT_WIDTH + 2)))
-    shown = agents[:slots]
+    idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
+    first = max(0, idx - slots + 1) if idx is not None else 0
+    shown = agents[first:first + slots]
     sgap = 2
     sw = (w - sgap * (slots - 1)) // slots
     xs = [i * (sw + sgap) + sw // 2 for i in range(slots)]
@@ -640,53 +797,71 @@ def diagram(store, s, w, compact, now):
     cv.put(trunk, 5, "│", LINE)
     cv.branch(6, xs, trunk, LINE, down=True)
     if len(agents) > slots:
-        hidden = agents[slots:]
-        live = sum(1 for a in hidden if a["end"] is None) if state != "ended" else 0
-        note = f"+{len(hidden)} más" + (f", {live} en marcha" if live else "") + " · p para verlos"
+        hidden = agents[:first] + agents[first + slots:]
+        live = sum(1 for v in hidden if v["running"])
+        note = f"+{len(hidden)} más" + (f", {live} en marcha" if live else "") + " · ←→ para verlos"
         cv.put(max(0, w - len(note)), 5, note, SWARM if live else DIM)
     if not compact:
-        cv.branch(14, xs, btrunk, LINE, down=False)
-        cv.put(btrunk, 15, "▼", LINE)
+        cv.branch(15, xs, btrunk, LINE, down=False)
+        cv.put(btrunk, 16, "▼", LINE)
     for i in range(slots):
         x = i * (sw + sgap)
-        a = shown[i] if i < len(shown) else None
-        live = a is not None and a["end"] is None and state != "ended"
-        st = SWARM if live else LINE
-        cv.put(xs[i], 7, "▼", st)
-        cv.box(x, 8, sw, 5, st)
+        v = shown[i] if i < len(shown) else None
+        live = v is not None and v["running"]
+        chosen = v is not None and v["id"] == sel
+        cv.put(xs[i], 7, "▼", SWARM if live else LINE)
+        cv.box(x, 8, sw, 6, "bold #ffffff" if chosen else SWARM if live else LINE, heavy=chosen)
         if not compact:
-            cv.put(xs[i], 13, "│", LINE)
-        if a is None:
+            cv.put(xs[i], 14, "│", LINE)
+        if v is None:
             cv.put(x + 2, 10, trunc("· libre ·", sw - 4), DIM)
             continue
-        head = a["type"] + (f" · {a['model']}" if a["model"] else "")
-        cv.put(x + 2, 9, trunc(head, sw - 4), f"bold {SWARM}" if live else DIM)
-        cv.put(x + 2, 10, trunc(a["desc"], sw - 4), FG if live else DIM)
+        inner = sw - 4
+        failed = bool(v["end"]) and v["status"] != "completed"
         if live:
-            cv.put(x + 2, 11, trunc(f"● {clock(now - a['start'])}", sw - 4), SWARM)
+            icon, ist = SPIN[(phase + i * 3) % len(SPIN)], f"bold {SWARM}"
+        elif failed:
+            icon, ist = "✗", f"bold {ERR}"
+        elif v["end"]:
+            icon, ist = "✓", f"bold {TOOL}"
+        else:
+            icon, ist = "■", DIM
+        head = v["type"] + (f" · {v['model']}" if v["model"] else "")
+        cv.put(x + 2, 9, icon, ist)
+        cv.put(x + 4, 9, trunc(head, inner - 2), f"bold {SWARM}" if live else "bold" if chosen else FG)
+        cv.put(x + 2, 10, trunc(v["desc"], inner), FG if live or chosen else DIM)
+        if live and v["tool"]:
+            cv.put(x + 2, 11, trunc(f"▶ {v['tool'][0]}: {v['tool'][1]}", inner), TOOL)
+        elif live:
+            cv.put(x + 2, 11, trunc("pensando…", inner), DIM)
+        else:
+            cv.put(x + 2, 11, trunc(v["response"] or "sin respuesta", inner), FG if chosen else DIM)
+        if live or v["end"]:
+            stats = clock((now if live else v["end"]) - v["start"])
+        else:
+            stats = "interrumpido"
+        stats += f" · {v['tools']} tools" if v["tools"] else ""
+        cv.put(x + 2, 12, trunc(stats, inner), SWARM if live else DIM)
+        if live:
             path = [(trunk, 5)] + hpath(trunk, xs[i], 6) + [(xs[i], 7)]
             px, py = path[(phase + i * 3) % len(path)]
             cv.put(px, py, "●", f"bold {SWARM}")
-        else:
-            end = a["end"] or now
-            status = "✓ " + clock(end - a["start"]) if a["end"] else "interrumpido"
-            cv.put(x + 2, 11, trunc(status, sw - 4), DIM)
-            if not compact and a["end"] and now - a["end"] < 8:
-                path = [(xs[i], 13)] + hpath(xs[i], btrunk, 14) + [(btrunk, 15)]
-                px, py = path[phase % len(path)]
-                cv.put(px, py, "●", f"bold {LEAD}")
+        elif not compact and v["end"] and now - v["end"] < 8:
+            path = [(xs[i], 14)] + hpath(xs[i], btrunk, 15) + [(btrunk, 16)]
+            px, py = path[phase % len(path)]
+            cv.put(px, py, "●", f"bold {LEAD}")
 
     # vuelta al lead
     if not compact:
         bw = min(56, w)
         bx = btrunk - bw // 2
-        cv.box(bx, 16, bw, 4, lst)
-        done = sum(1 for a in s.agents if a["end"])
-        cv.put(bx + 2, 17, trunc(f"de vuelta al lead · {done} subagentes terminados", bw - 4), lst)
+        cv.box(bx, 17, bw, 4, lst)
+        done = sum(1 for v in agents if v["end"])
+        cv.put(bx + 2, 18, trunc(f"de vuelta al lead · {done} subagente{'s' if done != 1 else ''} terminado{'s' if done != 1 else ''}", bw - 4), lst)
         stats = f"{s.turns} turnos · {s.tools} tools · out {ktok(s.out_tokens)} · ctx {ktok(s.ctx)}"
         if s.cost is not None:
             stats += f" · ${s.cost:.2f}"
-        cv.put(bx + 2, 18, trunc(stats, bw - 4), DIM)
+        cv.put(bx + 2, 19, trunc(stats, bw - 4), DIM)
     return cv.text()
 
 
@@ -748,33 +923,92 @@ def log_panel(store, focus, account, rows, width, now):
     return Panel(body, title="session log", title_align="left", box=box.SQUARE, border_style=LINE)
 
 
-def prompt_panel(s, view, rows, width, now):
-    """Prompt completo de un subagente. Ajusta view["agent"] y view["scroll"]."""
-    agents = s.sorted_agents() if s else []
-    if not agents:
-        view["agent"], view["scroll"] = None, 0
-        body = Text("esta sesión no ha lanzado subagentes", style=DIM)
-        return Panel(body, title="prompt", title_align="left", box=box.SQUARE, border_style=SWARM)
-    i = next((n for n, a in enumerate(agents) if a["id"] == view["agent"]), 0)
-    a = agents[i]
-    view["agent"] = a["id"]
+def stats_panel(store, s, now):
+    """Actividad de la sesión enfocada: lo que se muestra sin subagente seleccionado."""
+    t = Text()
+    if s is None:
+        return Panel(t, title="actividad", title_align="left", box=box.SQUARE, border_style=LINE)
+
+    def row(label, value, style=FG):
+        t.append(f"{label:<11}", style=DIM)
+        t.append(value + "\n", style=style)
+
+    def counts(c, n=5):
+        return " · ".join(f"{k} ×{v}" for k, v in c.most_common(n)) + (f" · +{len(c) - n} más" if len(c) > n else "")
+
+    row("modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
+                                         s.perm and f"permisos {s.perm}") if x))
+    usage = [f"{ktok(s.ctx)} en contexto"]
+    if s.cache_pct is not None:
+        usage.append(f"caché {s.cache_pct}%")
+    usage.append(f"salida {ktok(s.out_tokens)}")
+    if s.cost is not None:
+        usage.append(f"${s.cost:.2f}")
+    row("tokens", " · ".join(usage))
+    turns = str(s.turns)
+    if s.turns:
+        turns += f" · último {age(s.turn_last / 1000)} · total {age(s.turn_total / 1000)}"
+    row("turnos", turns)
+    tools = counts(s.tool_counts) or "ninguna"
+    row("tools", tools + (f" · {s.errors} con error" if s.errors else ""), TOOL if s.tool_counts else DIM)
+    row("skills", counts(s.skills) or "ninguna", ADVISOR if s.skills else DIM)
+    if s.mcp:
+        row("mcp", counts(s.mcp))
+    agents = store.agents(s)
+    if agents:
+        live = sum(1 for v in agents if v["running"])
+        row("subagentes", counts(Counter(v["type"] for v in agents)) + (f" · {live} en marcha" if live else ""), SWARM)
+    else:
+        row("subagentes", "ninguno", DIM)
+    if s.hooks:
+        row("hooks", counts(s.hooks))
+    code = []
+    if s.lines and any(s.lines):
+        code.append(f"+{s.lines[0]} −{s.lines[1]} líneas")
+    if s.branch:
+        code.append(f"rama {s.branch}")
+    if code:
+        row("código", " · ".join(code))
+    return Panel(t, title="actividad", title_align="left", box=box.SQUARE, border_style=LINE)
+
+
+def detail_panel(store, s, ui, rows, width, now):
+    """A la derecha del log: el subagente seleccionado, o la actividad de la sesión."""
+    agents = store.agents(s) if s else []
+    i = next((n for n, v in enumerate(agents) if v["id"] == ui["sel"]), None)
+    if i is None:
+        ui["sel"] = None
+        return stats_panel(store, s, now)
+    v = agents[i]
+    prompt = ui["tab"] == "prompt"
+    text = v["prompt"] if prompt else v["response"]
+    if not text:
+        text = "(prompt vacío)" if prompt else "todavía sin respuesta" if v["running"] else "(sin respuesta registrada)"
     lines = []
-    for raw in (a["prompt"] or "(prompt vacío)").splitlines() or [""]:
+    for raw in text.splitlines() or [""]:
         lines += textwrap.wrap(raw, max(20, width - 4), replace_whitespace=False,
                                drop_whitespace=False) or [""]
-    top = max(0, min(view["scroll"], len(lines) - rows))
-    view["scroll"] = top
-    body = Text("\n".join(lines[top: top + rows]), style=FG, no_wrap=True, overflow="ellipsis")
-    status = clock(now - a["start"]) + " en marcha" if a["end"] is None else "✓ " + clock(a["end"] - a["start"])
-    head = f"prompt {i + 1}/{len(agents)} · {a['type']}" + (f" · {a['model']}" if a["model"] else "")
-    title = trunc(f"{head} · {a['desc']} · {status}", max(10, width - 6))
-    more = len(lines) - top - rows
-    pos = f"líneas {top + 1}–{min(len(lines), top + rows)} de {len(lines)}" + (f" · {more} más ↓" if more > 0 else "")
-    return Panel(body, title=title, title_align="left", subtitle=pos, subtitle_align="right",
-                 box=box.SQUARE, border_style=SWARM)
+    body_rows = max(1, rows - 2)
+    ui["rows"] = body_rows
+    top = max(0, min(ui["scroll"], len(lines) - body_rows))
+    ui["scroll"] = top
+
+    tabs = Text(no_wrap=True, overflow="ellipsis")
+    tabs.append(" r respuesta ", style="reverse bold" if not prompt else DIM)
+    tabs.append(" ")
+    tabs.append(" p prompt ", style="reverse bold" if prompt else DIM)
+    state = "en marcha" if v["running"] else "terminado" if v["status"] == "completed" else v["status"] or "interrumpido"
+    tabs.append(f"   {state}", style=SWARM if v["running"] else DIM)
+    body = Text("\n".join(lines[top: top + body_rows]), style=FG, no_wrap=True, overflow="ellipsis")
+    head = f"subagente {i + 1}/{len(agents)} · {v['type']}" + (f" · {v['model']}" if v["model"] else "")
+    more = len(lines) - top - body_rows
+    pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
+    return Panel(Group(tabs, Text(""), body), title=trunc(f"{head} · {v['desc']}", max(10, width - 6)),
+                 title_align="left", subtitle=pos if len(lines) > body_rows else None,
+                 subtitle_align="right", box=box.SQUARE, border_style=SWARM)
 
 
-def footer(store, s, auto, account, now, prompt=False):
+def footer(store, s, auto, account, now, sel=False):
     t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         t.append("q salir", style=DIM)
@@ -787,48 +1021,55 @@ def footer(store, s, auto, account, now, prompt=False):
         t.append(f" {label} ", style=DIM)
         t.append(f"[{value}]", style=f"bold {color}")
 
+    agents = store.agents(s)
     field("lead", state, LEAD if state == "busy" else TOOL if state == "idle" else DIM)
-    field("subagents", f"{len(s.running_agents()) if state != 'ended' else 0}/{len(s.agents)}", SWARM)
+    field("subagents", f"{sum(1 for v in agents if v['running'])}/{len(agents)}", SWARM)
     field("advisor", "on call" if s.advisor else "off", ADVISOR)
     field("tools", len(s.pending) if state != "ended" else 0, TOOL)
     if store.multi:
         field("cuenta", account or "todas", ADVISOR)
-    if prompt:
-        t.append("   ←→ subagente · ↑↓ desplaza · p cierra · q salir", style=DIM)
-        return t
-    keys = "↑↓ sesión · p prompt · c cuenta · a auto · q salir" if store.multi else "↑↓ sesión · p prompt · a auto · q salir"
+    if sel:
+        keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
+    else:
+        keys = "←→ subagentes · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
-def render(console, store, focus_sid, account, now, view=None):
+def new_ui():
+    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1}
+
+
+def render(console, store, focus_sid, account, now, ui=None):
+    ui = ui if ui is not None else new_ui()
     width, height = console.size
     sessions = store.ordered(account)
     by_id = {s.sid: s for s in sessions}
     focus = by_id.get(focus_sid) or store.auto_focus(sessions)
-    if view is not None:
-        view["rows"] = max(1, height - 3 - 1 - 2)
-        root = Layout()
-        root.split_column(
-            Layout(header(store, sessions, account, now), name="head", size=3),
-            Layout(prompt_panel(focus, view, view["rows"], width, now), name="prompt"),
-            Layout(footer(store, focus, focus_sid is None, account, now, prompt=True), name="foot", size=1),
-        )
-        return root, sessions, focus
-    compact = height < 32
-    dh = 14 if compact else 20
+    compact = height < 34
+    dh = 15 if compact else 21
     wide = width >= 108
     side_w = 34 if wide else 0
-    log_rows = max(1, height - 3 - (dh + 2) - 1 - 2)
+    rows = max(1, height - 3 - (dh + 2) - 1 - 2)
+    split = width >= 100
+    detail_w = max(44, width * 2 // 5) if split else width
+
+    detail = detail_panel(store, focus, ui, rows, detail_w, now)
+    log = log_panel(store, focus, account, rows, width - detail_w if split else width, now)
+    bottom = Layout(name="bottom")
+    if split:
+        bottom.split_row(Layout(log), Layout(detail, size=detail_w))
+    else:
+        bottom.update(detail if ui["sel"] or ui["info"] else log)
 
     root = Layout()
     root.split_column(
         Layout(header(store, sessions, account, now), name="head", size=3),
         Layout(name="mid", size=dh + 2),
-        Layout(log_panel(store, focus, account, log_rows, width, now), name="log"),
-        Layout(footer(store, focus, focus_sid is None, account, now), name="foot", size=1),
+        bottom,
+        Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"])), name="foot", size=1),
     )
-    diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now),
+    diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now, ui["sel"]),
                  box=box.SQUARE, border_style=LINE,
                  title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left")
     if wide:
@@ -872,7 +1113,7 @@ def run(accounts, once):
     fd = sys.stdin.fileno() if termios is not None and sys.stdin.isatty() else None
     saved = termios.tcgetattr(fd) if fd is not None else None
     focus_sid = None
-    view = None  # con el prompt abierto: {"agent": id, "scroll": n, "rows": n}
+    ui = new_ui()
     try:
         if fd is not None:
             tty.setcbreak(fd)
@@ -880,49 +1121,46 @@ def run(accounts, once):
             while True:
                 now = time.time()
                 store.poll(now)
-                root, sessions, focus = render(console, store, focus_sid, account, now, view)
+                root, sessions, focus = render(console, store, focus_sid, account, now, ui)
                 live.update(root, refresh=True)
                 keys = read_keys(fd, 0.12)
                 if not keys:
                     continue
-                if b"q" in keys or b"\x03" in keys:
+                if keys in (b"q", b"\x03"):
                     break
-                if view is not None:
-                    agents = focus.sorted_agents() if focus else []
-                    page = max(1, view["rows"] - 2)
-                    if keys in (b"p", b"\x1b"):
-                        view = None
-                    elif keys in (b"j", b"\x1b[B"):
-                        view["scroll"] += 1
-                    elif keys in (b"k", b"\x1b[A"):
-                        view["scroll"] = max(0, view["scroll"] - 1)
-                    elif keys in (b" ", b"\x1b[6~"):
-                        view["scroll"] += page
-                    elif keys in (b"b", b"\x1b[5~"):
-                        view["scroll"] = max(0, view["scroll"] - page)
-                    elif keys in (b"l", b"h", b"\t", b"\x1b[C", b"\x1b[D") and agents:
-                        i = next((n for n, a in enumerate(agents) if a["id"] == view["agent"]), 0)
-                        step = -1 if keys in (b"h", b"\x1b[D") else 1
-                        view = {"agent": agents[(i + step) % len(agents)]["id"], "scroll": 0, "rows": view["rows"]}
-                    continue
-                if keys == b"p":
-                    focus_sid = focus.sid if focus else None
-                    view = {"agent": None, "scroll": 0, "rows": 1}
-                    continue
-                if b"a" in keys:
-                    focus_sid = None
-                if b"c" in keys and store.multi:
+                ids = [v["id"] for v in store.agents(focus)] if focus else []
+                page = max(1, ui["rows"] - 1)
+                if keys in (b"l", b"h", b"\x1b[C", b"\x1b[D"):
+                    order = [None] + ids
+                    i = order.index(ui["sel"]) if ui["sel"] in order else 0
+                    ui["sel"] = order[(i + (1 if keys in (b"l", b"\x1b[C") else -1)) % len(order)]
+                    ui["scroll"] = 0
+                    if ui["sel"]:
+                        focus_sid = focus.sid  # que el modo auto no cambie de sesión mientras se lee
+                elif keys == b"\x1b":
+                    ui["sel"] = None
+                elif keys in (b"p", b"r"):
+                    if ui["sel"] is None and ids:
+                        ui["sel"], focus_sid = ids[0], focus.sid
+                    ui["tab"] = "prompt" if keys == b"p" else "resp"
+                    ui["scroll"] = 0
+                elif keys == b"i":
+                    ui["info"] = not ui["info"]
+                elif keys in (b" ", b"\x1b[6~"):
+                    ui["scroll"] += page
+                elif keys in (b"b", b"\x1b[5~"):
+                    ui["scroll"] = max(0, ui["scroll"] - page)
+                elif keys == b"a":
+                    focus_sid, ui["sel"] = None, None
+                elif keys == b"c" and store.multi:
                     cycle = [None] + [a.name for a in accounts]
                     account = cycle[(cycle.index(account) + 1) % len(cycle)]
-                    focus_sid = None
-                step = 0
-                if keys in (b"j", b"\t", b"\x1b[B"):
-                    step = 1
-                elif keys in (b"k", b"\x1b[A"):
-                    step = -1
-                if step and sessions:
+                    focus_sid, ui["sel"] = None, None
+                elif keys in (b"j", b"k", b"\t", b"\x1b[A", b"\x1b[B") and sessions:
+                    step = -1 if keys in (b"k", b"\x1b[A") else 1
                     i = sessions.index(focus) if focus in sessions else 0
-                    focus_sid = sessions[(i + step) % len(sessions)].sid
+                    focus_sid, ui["sel"] = sessions[(i + step) % len(sessions)].sid, None
+                    ui["scroll"] = 0
     except KeyboardInterrupt:
         pass
     finally:

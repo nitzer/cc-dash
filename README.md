@@ -41,8 +41,18 @@ cc-dash -a personal     # solo una cuenta (repetible)
 cc-dash --once          # imprime un fotograma y sale
 ```
 
-Teclas: `↑`/`↓` o `j`/`k` cambia de sesión · `p` abre el prompt de un subagente · `c` filtra por cuenta ·
-`a` vuelve al modo automático · `q` sale.
+Teclas:
+
+- `↑`/`↓` o `j`/`k`: cambia de sesión · `a`: vuelve al modo automático
+- `←`/`→`: selecciona un subagente · `Esc`: lo suelta
+- `r`: última respuesta del subagente · `p`: su prompt
+- `AvPág`/`RePág` (o espacio/`b`): desplaza el detalle
+- `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
+
+El panel a la derecha del log muestra el subagente seleccionado (respuesta o
+prompt) o, si no hay ninguno, la actividad de la sesión: tokens y caché,
+turnos, herramientas más usadas, errores, skills, servidores MCP, subagentes
+por tipo, hooks y líneas de código cambiadas.
 
 ## Cuentas
 
