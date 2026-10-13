@@ -9,6 +9,7 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
+        o muestra la lista de tareas de la sesión (hechas, en curso y pendientes)
         / busca en el log (Enter aplica, Esc borra) · y copia lo que se está viendo
         E activa o apaga los efectos (arranque, glitch en avisos, lluvia en reposo)
         Enter salta al panel de tmux de la sesión enfocada
@@ -59,7 +60,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1901,13 +1902,55 @@ def stats_panel(store, s, now):
     return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
 
 
+def tasks_panel(store, s, ui, rows, width):
+    """La lista de tareas de la sesión: hechas, en curso y pendientes."""
+    frame = dict(title_align="left", subtitle_align="right", box=PANEL_BOX, border_style=TOOL)
+    tasks = list(s.todos.values()) if s else []
+    if not tasks:
+        return Panel(Text("esta sesión no lleva una lista de tareas", style=DIM),
+                     title=label("tareas", "TODO"), **frame)
+    done = sum(1 for t in tasks if t["status"] == "completed")
+    fill = round(done / len(tasks) * 12)
+    head = Text(no_wrap=True, overflow="ellipsis")
+    head.append("▰" * fill, style=TOOL)
+    head.append("▱" * (12 - fill), style=LINE)
+    left = len(tasks) - done
+    head.append(f" {done} de {len(tasks)} hechas · {left} pendiente{'s' if left != 1 else ''}", style=FG)
+
+    body_rows = max(1, rows - 2)
+    ui["rows"] = body_rows
+    if ui["tasks_of"] != s.sid:   # al cambiar de sesión vuelve a seguir la tarea en curso
+        ui["tasks_of"], ui["scroll"] = s.sid, -1
+    top = ui["scroll"]
+    if top < 0:  # sin desplazar a mano, la tarea en curso queda a la vista
+        doing = next((i for i, t in enumerate(tasks) if t["status"] == "in_progress"), 0)
+        top = doing - body_rows // 3
+    top = max(0, min(top, len(tasks) - body_rows))
+    ui["tasks_top"] = top
+    body = Text(no_wrap=True, overflow="ellipsis")
+    chunk = tasks[top: top + body_rows]
+    for n, task in enumerate(chunk):
+        if task["status"] == "completed":
+            mark, style, text = "✓", DIM, task["subject"]
+        elif task["status"] == "in_progress":
+            mark, style, text = "▶", f"bold {LEAD}", task["active"] or task["subject"]
+        else:
+            mark, style, text = "☐", FG, task["subject"]
+        body.append(f" {mark} ", style=f"bold {TOOL}" if mark == "✓" else style)
+        body.append(trunc(text, max(10, width - 8)) + ("\n" if n < len(chunk) - 1 else ""), style=style)
+    more = len(tasks) - top - body_rows
+    pos = f"{top + 1}–{top + len(chunk)} de {len(tasks)}" + (" ↓" if more > 0 else "")
+    return Panel(Group(head, Text(""), body), title=label("tareas", "TODO"),
+                 subtitle=pos if len(tasks) > body_rows else None, **frame)
+
+
 def detail_panel(store, s, ui, rows, width, now):
     """A la derecha del log: el subagente seleccionado, o la actividad de la sesión."""
     agents = store.visible(s, now, ui["all"], ui["sel"])
     i = next((n for n, v in enumerate(agents) if v["id"] == ui["sel"]), None)
     if i is None:
         ui["sel"] = None
-        return stats_panel(store, s, now)
+        return tasks_panel(store, s, ui, rows, width) if ui["tasks"] else stats_panel(store, s, now)
     v = agents[i]
     prompt = ui["tab"] == "prompt"
     text = v["prompt"] if prompt else v["response"]
@@ -2033,7 +2076,7 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "Enter ir · s log · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "Enter ir · s log · o tareas · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
@@ -2061,6 +2104,8 @@ def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
+            "tasks": False,               # lista de tareas en lugar de la actividad (tecla o)
+            "tasks_of": None, "tasks_top": 0,   # sesión mostrada y primera fila visible
             "find": "", "typing": None,   # filtro del log y texto que se está escribiendo (bytes)
             "glitch": 0.0,                # hasta cuándo dura el parpadeo de un aviso
             "flash": ("", 0.0),  # (mensaje, hasta cuándo) en la barra inferior
@@ -2101,7 +2146,7 @@ def render(console, store, focus_sid, account, now, ui=None):
     elif lg is not None:
         bottom.update(detail if lg["pane"] == "out" else log)
     else:
-        bottom.update(detail if ui["sel"] or ui["info"] else log)
+        bottom.update(detail if ui["sel"] or ui["info"] or ui["tasks"] else log)
 
     root = Layout()
     root.split_column(
@@ -2355,6 +2400,11 @@ def run(accounts, once, cfg):
                     ui["flash"] = (f"copiado ({len(text)} caracteres)" if text
                                    else "nada que copiar: abre una entrada del log (s) o un subagente", now + 3)
                     continue
+                if keys == b"o":
+                    ui["tasks"], ui["scroll"], ui["tasks_of"] = not ui["tasks"], 0, None
+                    if ui["tasks"]:
+                        ui["sel"] = ui["log"] = None   # el panel de la derecha pasa a ser el de tareas
+                    continue
                 if keys == b"E":
                     ui["effects"] = cfg["effects"] = not ui["effects"]
                     ui["flash"] = ("efectos activados" if ui["effects"] else "efectos apagados", now + 2)
@@ -2488,10 +2538,11 @@ def run(accounts, once, cfg):
                         save_config(cfg)
                     except OSError:
                         pass
-                elif keys in (b" ", b"\x1b[6~"):
-                    ui["scroll"] += page
-                elif keys in (b"b", b"\x1b[5~"):
-                    ui["scroll"] = max(0, ui["scroll"] - page)
+                elif keys in (b" ", b"\x1b[6~", b"b", b"\x1b[5~"):
+                    if ui["tasks"] and ui["scroll"] < 0:
+                        ui["scroll"] = ui["tasks_top"]   # deja de seguir la tarea en curso
+                    step = page if keys in (b" ", b"\x1b[6~") else -page
+                    ui["scroll"] = max(0, ui["scroll"] + step)
                 elif keys == b"a":
                     focus_sid, ui["sel"] = None, None
                 elif keys == b"c" and store.multi:

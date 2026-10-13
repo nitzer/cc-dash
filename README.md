@@ -122,6 +122,9 @@ subagentes quedan fuera porque sus transcripts no los registran bien.
 - **Tareas:** si la sesión lleva una lista de tareas, la cabecera del lead y
   el panel de actividad muestran una barra de progreso (`▰▰▰▱▱ 1/4`) y la
   tarea en curso.
+- **`o`** cambia el panel de actividad por la lista completa de tareas: `✓`
+  hechas, `▶` la que está en curso y `☐` pendientes, con el recuento arriba.
+  `AvPág`/`RePág` la desplazan si no cabe.
 - **Git:** el panel de actividad muestra, para la carpeta de la sesión
   enfocada, la rama, los archivos modificados y sin seguimiento, y los commits
   hechos desde que empezó la sesión. Se consulta cada 20 segundos, sin
