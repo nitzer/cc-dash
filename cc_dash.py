@@ -5,29 +5,7 @@ Por cada cuenta (un directorio de configuración de Claude Code) lee
 sessions/*.json (sesiones abiertas) y projects/**/*.jsonl (modelo,
 herramientas, subagentes, tokens). Solo lectura: no toca ni envía nada.
 
-Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto · q sale
-        ←/→ selecciona un subagente · r su última respuesta · p su prompt
-        AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
-        t muestra/oculta los subagentes ya terminados
-        o muestra las tareas de la sesión: subagentes y comandos en segundo plano,
-          y su lista de pendientes si lleva una
-        n muestra el registro de novedades · x cierra todos los toasts
-        X apaga o enciende los toasts de forma permanente
-        , abre la ventana de configuración (j/k mover, h/l cambiar, r por defecto, Esc cerrar)
-        / busca en el log (Enter aplica, Esc borra) · y copia lo que se está viendo
-        E activa o apaga los efectos (arranque, glitch en avisos, lluvia en reposo)
-        Enter salta al panel de tmux de la sesión enfocada
-        T cambia el tema (clasico, neon, matrix, ambar) · m silencia los avisos
-        d cambia el diseño del panel de agentes (lista, tabla, tarjetas,
-          tiempo, diagrama); la elección se guarda en la configuración
-        f limita el log a la sesión enfocada (con un subagente seleccionado,
-          el log muestra solo lo de ese subagente)
-        s pone el cursor en el session log: j/k recorre las entradas y el
-          panel de la derecha muestra el detalle completo de cada una
-          (entrada y salida); l entra al detalle (j/k lo desplazan), h vuelve
-          al log, AvPág/RePág desplazan el detalle, G vuelve a la última, s cierra
-        v muestra la conversación de la sesión enfocada en lugar del diagrama
-          (mismas teclas: j/k sesión, l entra, h vuelve)
+Dentro del dashboard, ? muestra todas las teclas.
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
@@ -67,7 +45,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2223,7 +2201,7 @@ def session_panel(store, s, view, rows, width, now):
                  subtitle_align="right", box=PANEL_BOX, border_style=LEAD if view["pane"] == "out" else LINE)
 
 
-def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
+def footer(store, s, auto, account, now, sel=False, hint=None, flash=None, width=200):
     t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         t.append("q salir", style=DIM)
@@ -2239,8 +2217,9 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
     agents = store.agents(s)
     field("lead", state, state_color(state))
     field("subagents", f"{sum(1 for v in agents if v['running'])}/{len(agents)}", SWARM)
-    field("advisor", "on call" if s.advisor else "off", ADVISOR)
-    field("tools", len(s.pending) if state != "ended" else 0, TOOL)
+    if width >= 110:   # en terminales estrechas se prioriza la ayuda de teclas
+        field("advisor", "on call" if s.advisor else "off", ADVISOR)
+        field("tools", len(s.pending) if state != "ended" else 0, TOOL)
     if store.multi:
         field("cuenta", account or "todas", ADVISOR)
     if flash:
@@ -2250,9 +2229,9 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
         t.append(f"   {hint}", style=DIM)
         return t
     if sel:
-        keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
+        keys = "←→ subagente · r respuesta · p prompt · Esc soltar · ? ayuda"
     else:
-        keys = ", config · Enter ir · s log · o tareas · n novedades · x cierra toasts · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "? ayuda · , config · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
@@ -2292,6 +2271,104 @@ class Overlay:
         for line in lines:
             yield from line
             yield Segment.line()
+
+
+# La ayuda (tecla ?): grupos de (teclas, qué hacen)
+KEYS = [
+    ("Sesiones", [
+        ("↑ ↓  ·  j k", "cambia de sesión"),
+        ("a", "vuelve al modo automático"),
+        ("Enter", "salta al panel de tmux de la sesión"),
+        ("c", "filtra por cuenta, si hay más de una"),
+        ("v", "conversación de la sesión"),
+    ]),
+    ("Subagentes", [
+        ("← →  ·  h l", "selecciona un subagente"),
+        ("r  ·  p", "su última respuesta  ·  su prompt"),
+        ("Esc", "suelta la selección"),
+        ("t", "muestra u oculta los ya terminados"),
+    ]),
+    ("Session log", [
+        ("s", "cursor en el log (l entra al detalle)"),
+        ("f", "solo las entradas de la sesión enfocada"),
+        ("/", "busca texto (Enter aplica, Esc borra)"),
+        ("y", "copia lo que tienes delante"),
+    ]),
+    ("Panel derecho", [
+        ("o", "tareas: segundo plano y pendientes"),
+        ("n", "registro de novedades"),
+        ("i", "actividad, en terminales estrechas"),
+        ("AvPág RePág", "desplaza el panel  ·  también espacio y b"),
+    ]),
+    ("Avisos", [
+        ("x", "cierra los toasts en pantalla"),
+        ("X", "apaga o enciende los toasts"),
+        ("m", "silencia el pitido y el aviso de tmux"),
+    ]),
+    ("Apariencia y ajustes", [
+        ("d", "diseño del panel de agentes"),
+        ("T", "tema de colores"),
+        ("E", "efectos visuales"),
+        (",", "configuración: ajustes y cuentas"),
+    ]),
+    ("General", [
+        ("?", "esta ayuda"),
+        ("q", "salir"),
+    ]),
+]
+
+
+def help_panel(view, width, max_rows):
+    """Ventana flotante con todas las teclas, en dos columnas si hay ancho."""
+    key_w = 13
+
+    def block(groups, col_w):
+        out = []
+        for title, rows in groups:
+            if out:
+                out.append(Text(""))
+            out.append(Text(title.upper(), style=f"bold {SWARM}"))
+            for keys, what in rows:
+                line = Text(no_wrap=True, overflow="ellipsis")
+                line.append(f"{keys:<{key_w}}", style=f"bold {LEAD}")
+                line.append(trunc(what, col_w - key_w), style=FG)
+                out.append(line)
+        return out
+
+    inner = width - 4
+    if inner >= 96:   # dos columnas, repartiendo los grupos por número de filas
+        half, left, count = sum(len(rows) + 2 for _, rows in KEYS) / 2, [], 0
+        for group in KEYS:
+            size = len(group[1]) + 2
+            if left and count + size / 2 > half:
+                break
+            left.append(group)
+            count += size
+        col_w = (inner - 3) // 2
+        a, b = block(left, col_w), block(KEYS[len(left):], col_w)
+        lines = []
+        for n in range(max(len(a), len(b))):
+            line = Text(no_wrap=True, overflow="ellipsis")
+            line.append_text(a[n] if n < len(a) else Text(""))
+            line.pad_right(max(0, col_w + 3 - len(line.plain)))
+            line.append_text(b[n] if n < len(b) else Text(""))
+            lines.append(line)
+    else:
+        lines = block(KEYS, inner)
+    room = max(3, max_rows - 4)
+    view["rows"] = room
+    top = max(0, min(view["top"], len(lines) - room))
+    view["top"] = top
+    body = Text(no_wrap=True, overflow="ellipsis")
+    chunk = lines[top: top + room]
+    for n, line in enumerate(chunk):
+        body.append_text(line)
+        body.append("\n")
+    more = len(lines) > room
+    body.append("\n" + ("j/k desplaza · " if more else "") + "cualquier otra tecla cierra", style=DIM)
+    return Panel(body, title=label("teclas", "HELP"), title_align="left", box=box.HEAVY,
+                 border_style=f"bold {SWARM}", style=f"on {CARD_BG}", width=width,
+                 subtitle=f"{top + 1}–{top + len(chunk)} de {len(lines)}" if more else None, subtitle_align="right")
 
 
 # (clave, nombre, tipo, opciones o paso, valor por defecto, ayuda); None separa secciones
@@ -2459,6 +2536,8 @@ def news_panel(store, ui, rows, width, now):
 
 
 def mode_hint(ui):
+    if ui["help"] is not None:
+        return "teclas · cualquier tecla cierra"
     if ui["settings"] is not None:
         return "configuración: j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar"
     if ui["typing"] is not None:
@@ -2478,6 +2557,7 @@ def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
+            "help": None,                 # ventana de teclas abierta: {"top": fila, "rows": n}
             "settings": None,             # ventana de configuración abierta: {"at": fila}
             "cfg": None,                  # la configuración cargada, para dibujar esa ventana
             "toasts_on": True,            # si las novedades salen como toast (tecla X)
@@ -2533,7 +2613,8 @@ def render(console, store, focus_sid, account, now, ui=None):
         Layout(name="mid", size=dh + 2),
         bottom,
         Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"]),
-                      hint=mode_hint(ui), flash=ui["flash"][0] if now < ui["flash"][1] and ui["typing"] is None else None),
+                      hint=mode_hint(ui), flash=ui["flash"][0] if now < ui["flash"][1] and ui["typing"] is None else None,
+                      width=width),
                name="foot", size=1),
     )
     if ui["session"] is not None:
@@ -2565,12 +2646,17 @@ def render(console, store, focus_sid, account, now, ui=None):
     else:
         root["mid"].update(diag)
     ui["toasts"][:] = [t for t in ui["toasts"] if now - t["born"] < TOAST_LIFE]
-    modal = (settings_panel(ui["cfg"], store, ui["settings"], min(66, width - 2), height - 4)
-             if ui["settings"] is not None else None)
+    modal, modal_w = None, 0
+    if ui["help"] is not None:
+        modal_w = min(112, width - 2)
+        modal = help_panel(ui["help"], modal_w, height - 4)
+    elif ui["settings"] is not None:
+        modal_w = min(66, width - 2)
+        modal = settings_panel(ui["cfg"], store, ui["settings"], modal_w, height - 4)
     if ui["toasts"] or modal is not None:
         tw = max(30, min(46, width // 2))
         root = Overlay(root, [toast_panel(t, tw, now) for t in ui["toasts"]], tw,
-                       modal=modal, modal_width=min(66, width - 2))
+                       modal=modal, modal_width=modal_w)
     return root, sessions, focus
 
 
@@ -2815,6 +2901,20 @@ def run(accounts, once, cfg):
                         ui["typing"] += keys
                     if ui["log"] is not None:
                         ui["log"]["cur"], ui["log"]["scroll"] = None, 0
+                    continue
+                if ui["help"] is not None:
+                    # ventana de teclas: j/k la desplazan, cualquier otra tecla la cierra
+                    if keys == b"\x03":
+                        break
+                    if keys in (b"j", b"\x1b[B", b"\x1b[6~"):
+                        ui["help"]["top"] += 1 if keys != b"\x1b[6~" else ui["help"]["rows"]
+                    elif keys in (b"k", b"\x1b[A", b"\x1b[5~"):
+                        ui["help"]["top"] = max(0, ui["help"]["top"] - (1 if keys != b"\x1b[5~" else ui["help"]["rows"]))
+                    else:
+                        ui["help"] = None
+                    continue
+                if keys == b"?" and ui["settings"] is None:
+                    ui["help"] = {"top": 0, "rows": 1}
                     continue
                 if ui["settings"] is not None:
                     # ventana de configuración: captura todas las teclas

@@ -41,37 +41,18 @@ cc-dash -a personal     # solo una cuenta (repetible)
 cc-dash --once          # imprime un fotograma y sale
 ```
 
-Teclas:
+Dentro del dashboard, **`?`** abre una ventana flotante con todas las teclas,
+agrupadas por tema; cualquier tecla la cierra. La barra inferior muestra solo
+el estado de la sesión enfocada y los atajos esenciales (`? ayuda · , config ·
+q salir`), más los propios del modo en que estés.
+
+Las principales:
 
 - `↑`/`↓` o `j`/`k`: cambia de sesión · `a`: vuelve al modo automático
-- `←`/`→`: selecciona un subagente · `Esc`: lo suelta
-- `r`: última respuesta del subagente · `p`: su prompt
-- `t`: muestra u oculta los subagentes ya terminados (se retiran solos del
-  diagrama un minuto después de acabar)
-- `AvPág`/`RePág` (o espacio/`b`): desplaza el detalle
-- `f`: limita el log a la sesión enfocada; con un subagente seleccionado el
-  log muestra solo lo de ese subagente
-- `s`: pone el cursor en el session log. El panel de la derecha pasa a ser un
-  recuadro de color con el detalle completo de la entrada elegida: los
-  parámetros de la herramienta y su salida, el prompt entero, o el prompt y
-  la respuesta de un subagente. Se navega al estilo vim:
-  - `j`/`k`: recorre las entradas del log · `g` primera · `G` última (y sigue
-    a las nuevas)
-  - `l` (o `→`, `Enter`): entra al detalle; ahí `j`/`k` lo desplazan
-  - `h` (o `←`): vuelve al log
-  - `AvPág`/`RePág` desplazan el detalle siempre · `s` o `Esc` cierra
-- `v`: muestra la conversación de la sesión enfocada en lugar del diagrama,
-  con las mismas teclas (`j`/`k` cambia de sesión, `l` entra, `h` vuelve) y
-  una tarjeta con los datos de la sesión bajo la lista
-- `d`: cambia el diseño del panel de agentes y lo guarda en la configuración:
-  - `lista`: dos líneas por subagente y una barra de tiempo a la derecha
-  - `tabla`: una línea por subagente, en columnas
-  - `tarjetas`: tarjetas en cuadrícula
-  - `tiempo`: línea de tiempo con una barra para el lead y otra por subagente
-  - `diagrama`: el diagrama original con flechas
-
-  También se puede elegir con `cc-dash --layout tabla`
-- `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
+- `←`/`→`: selecciona un subagente · `r`/`p`: su respuesta o su prompt
+- `s`: cursor en el session log, con el detalle de cada entrada a la derecha
+- `o`: tareas · `n`: novedades · `v`: conversación de la sesión
+- `d`: diseño · `T`: tema · `,`: configuración · `q`: sale
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
 prompt) o, si no hay ninguno, la actividad de la sesión: porcentaje de la
