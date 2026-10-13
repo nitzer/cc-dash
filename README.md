@@ -63,6 +63,14 @@ Teclas:
 - `v`: muestra la conversación de la sesión enfocada en lugar del diagrama,
   con las mismas teclas (`j`/`k` cambia de sesión, `l` entra, `h` vuelve) y
   una tarjeta con los datos de la sesión bajo la lista
+- `d`: cambia el diseño del panel de agentes y lo guarda en la configuración:
+  - `lista`: dos líneas por subagente y una barra de tiempo a la derecha
+  - `tabla`: una línea por subagente, en columnas
+  - `tarjetas`: tarjetas en cuadrícula
+  - `tiempo`: línea de tiempo con una barra para el lead y otra por subagente
+  - `diagrama`: el diagrama original con flechas
+
+  También se puede elegir con `cc-dash --layout tabla`
 - `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
@@ -93,6 +101,7 @@ El archivo es `~/.config/cc-dash/config.toml` y se puede editar a mano:
 ```toml
 include_default = true          # añade ~/.claude si no está listada
 auto_update = true              # se actualiza solo al arrancar
+layout = "lista"                # diseño del panel de agentes
 scan = ["/srv/dev/claude"]
 
 [[account]]

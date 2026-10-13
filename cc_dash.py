@@ -9,6 +9,8 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
+        d cambia el diseño del panel de agentes (lista, tabla, tarjetas,
+          tiempo, diagrama); la elección se guarda en la configuración
         f limita el log a la sesión enfocada (con un subagente seleccionado,
           el log muestra solo lo de ese subagente)
         s pone el cursor en el session log: j/k recorre las entradas y el
@@ -51,7 +53,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -186,7 +188,7 @@ def config_path():
 
 
 def load_config():
-    cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True}
+    cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista"}
     try:
         with open(config_path(), "rb") as fh:
             raw = tomllib.load(fh)
@@ -198,6 +200,7 @@ def load_config():
     cfg["scan"] = [d for d in raw.get("scan", []) if isinstance(d, str)]
     cfg["include_default"] = bool(raw.get("include_default", True))
     cfg["auto_update"] = bool(raw.get("auto_update", True))
+    cfg["layout"] = raw.get("layout") if raw.get("layout") in LAYOUTS else "lista"
     return cfg
 
 
@@ -211,6 +214,8 @@ def save_config(cfg):
         "# auto_update: al abrir el dashboard, busca cambios en el repo y se reinstala.",
         f"include_default = {'true' if cfg['include_default'] else 'false'}",
         f"auto_update = {'true' if cfg['auto_update'] else 'false'}",
+        "# layout: diseño del panel de agentes (lista, tabla, tarjetas, tiempo, diagrama); tecla d.",
+        f"layout = {json.dumps(cfg['layout'])}",
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
     ]
     for a in cfg["account"]:
@@ -349,6 +354,8 @@ class Session:
         self.turns = 0
         self.turn_last = 0      # ms
         self.turn_total = 0     # ms
+        self.turn_start = None  # inicio del turno en curso
+        self.turn_spans = deque(maxlen=400)  # (inicio, fin) de los turnos ya cerrados
         self.tools = 0
         self.errors = 0
         self.tool_counts = Counter()
@@ -579,6 +586,9 @@ class Store:
             s.turns += 1
             s.turn_last = o.get("durationMs") or 0
             s.turn_total += s.turn_last
+            if ts:
+                s.turn_spans.append((ts - s.turn_last / 1000, ts))
+            s.turn_start = None
             s.pending.clear()
         elif kind == "assistant":
             if not side:
@@ -632,6 +642,8 @@ class Store:
                         self.event(ts, sid, ADVISOR, "advisor", "consulta al advisor")
         elif kind == "user":
             if isinstance(content, str):
+                if not side and s.turn_start is None:
+                    s.turn_start = ts
                 if not side and not o.get("isMeta") and not content.lstrip().startswith("<"):
                     s.pending.clear()
                     item = s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
@@ -979,6 +991,268 @@ def diagram(store, s, w, compact, now, sel=None, show_all=False):
         if s.cost is not None:
             stats += f" · ${s.cost:.2f}"
         cv.put(bx + 2, 19, trunc(stats, bw - 4), DIM)
+    return cv.text()
+
+
+# ── diseños alternativos del panel de agentes (tecla d) ──────────────────
+
+LAYOUTS = ("lista", "tabla", "tarjetas", "tiempo", "diagrama")
+DONE = "#4f6f9f"   # barra de un subagente ya terminado
+
+
+def segs(cv, x, y, parts):
+    """Escribe tramos (texto, estilo) seguidos y devuelve la columna final."""
+    for text, style in parts:
+        cv.put(x, y, text, style)
+        x += len(text)
+    return x
+
+
+def agent_icon(v, phase, i=0):
+    if v["running"]:
+        return SPIN[(phase + i * 3) % len(SPIN)], f"bold {SWARM}"
+    if v["end"] and v["status"] != "completed":
+        return "✗", f"bold {ERR}"
+    if v["end"]:
+        return "✓", f"bold {TOOL}"
+    return "■", DIM
+
+
+def agent_now(v):
+    """Qué hace el subagente ahora mismo, o cómo terminó."""
+    if v["running"]:
+        return (f"▶ {v['tool'][0]}: {v['tool'][1]}", TOOL) if v["tool"] else ("pensando…", DIM)
+    if v["end"] and v["status"] != "completed":
+        return (v["status"] or "error", ERR)
+    if not v["end"]:
+        return ("interrumpido", DIM)
+    return (v["response"] or "sin respuesta", DIM)
+
+
+def n_tools(n):
+    return f"{n} tool{'s' if n != 1 else ''}"
+
+
+def agent_time(v, now):
+    if v["running"]:
+        return clock(now - v["start"])
+    return clock(v["end"] - v["start"]) if v["end"] else "—"
+
+
+def agent_bar_style(v, now):
+    if v["running"]:
+        return f"bold {breath(SWARM, now)}"
+    return ERR if v["end"] and v["status"] != "completed" else DONE
+
+
+def lead_block(cv, store, s, w, now, phase, compact=False):
+    """Cabecera del lead (3 líneas, o 1 en `compact`). Devuelve la siguiente fila libre."""
+    state = store.state(s)
+    color = LEAD if state != "ended" else DIM
+    label = {"busy": "trabajando", "idle": "esperando prompt", "ended": "cerrada"}[state]
+    spin = SPIN[phase % len(SPIN)] if state == "busy" else "■"
+    right = f"{spin} {label} · {s.turns} turno{'s' if s.turns != 1 else ''}"
+    pct = min(100, round(100 * s.ctx / s.window())) if s.ctx else 0
+    if compact:
+        left = f"{short_model(s.model)} · contexto {pct}%" + (f" · ${s.cost:.2f}" if s.cost is not None else "")
+        x = segs(cv, 0, 0, [("LEAD  ", f"bold {color}")])
+        cv.put(x, 0, trunc(left, max(0, w - x - len(right) - 2)), "bold")
+        cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
+        return 2
+    x = segs(cv, 0, 0, [("LEAD  ", f"bold {color}")])
+    who = short_model(s.model) + (f" · effort {s.effort}" if s.effort else "") + f" · {store.label(s)}"
+    cv.put(x, 0, trunc(who, max(0, w - x - len(right) - 2)), "bold")
+    cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
+    if s.pending and state != "ended":
+        name, lab, _ = max(s.pending.values(), key=lambda p: p[2])
+        more = f" (+{len(s.pending) - 1})" if len(s.pending) > 1 else ""
+        cv.put(0, 1, trunc(f"▶ {name}{more}: {lab}", w), TOOL)
+    else:
+        cv.put(0, 1, trunc(s.title or "—", w), DIM)
+    fill = round(pct / 100 * 12)
+    x = segs(cv, 0, 2, [("contexto ", DIM), ("█" * fill, TOOL if pct < 60 else LEAD if pct < 85 else ERR),
+                        ("░" * (12 - fill), LINE), (f" {pct}%", FG)])
+    extra = [f"salida {ktok(s.out_tokens)}"]
+    if s.cache_pct is not None:
+        extra.append(f"caché {s.cache_pct}%")
+    if s.cost is not None:
+        extra.append(f"${s.cost:.2f}")
+    if s.advisor:
+        extra.append(f"advisor {short_model(s.advisor)}")
+    cv.put(x + 3, 2, trunc(" · ".join(extra), max(0, w - x - 3)), DIM)
+    return 4
+
+
+def time_window(agents, now, floor=1800):
+    """Tramo de tiempo que cubren las barras: desde el primer subagente visible hasta ahora."""
+    starts = [v["start"] for v in agents if v["start"]]
+    t0 = min(starts) if starts else now - floor
+    return min(t0, now - 60), now
+
+
+def time_axis(cv, x, y, w, t0, t1):
+    fmt = "%H:%M:%S" if t1 - t0 < 600 else "%H:%M"
+    used = w - len("ahora")
+    cv.put(x + used, y, "ahora", DIM)
+    free = 0  # primera columna libre, para que las etiquetas no se pisen
+    for frac in (0, 1 / 3, 2 / 3):
+        label = time.strftime(fmt, time.localtime(t0 + (t1 - t0) * frac))
+        at = int(w * frac)
+        if at >= free and at + len(label) + 1 < used:
+            cv.put(x + at, y, label, DIM)
+            free = at + len(label) + 2
+
+
+def time_bar(cv, x, y, w, t0, t1, start, end, style, running):
+    span = max(1.0, t1 - t0)
+    a = min(w - 1, max(0, int((start - t0) / span * w)))
+    b = w if running else min(w, max(a + 1, int(((end or t1) - t0) / span * w)))
+    cv.put(x, y, "·" * a, LINE)
+    cv.put(x + a, y, "█" * (b - a), style)
+    if running:
+        cv.put(x + w - 1, y, "▌", style)
+
+
+def pick(agents, cap, sel):
+    """Los `cap` subagentes que caben, desplazados para no perder el seleccionado."""
+    at = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
+    first = at - cap + 1 if at is not None and at >= cap else 0
+    return agents[first: first + cap]
+
+
+def agents_header(cv, y, w, everyone, agents, shown, room):
+    """Línea 'SUBAGENTES …' con los recuentos y lo que queda fuera de la vista."""
+    live = sum(1 for v in everyone if v["running"])
+    done = sum(1 for v in everyone if v["end"])
+    x = segs(cv, 0, y, [("SUBAGENTES  ", f"bold {SWARM}"), (f"{live} en marcha · {done} terminados", FG)])
+    notes = []
+    if len(agents) > len(shown):
+        notes.append(f"+{len(agents) - len(shown)} más · ←→")
+    gone = len(everyone) - len(agents)
+    if gone:
+        notes.append(f"{gone} oculto{'s' if gone != 1 else ''} · t")
+    if notes:
+        cv.put(x + 3, y, trunc(" · ".join(notes), max(0, room - x - 3)), DIM)
+
+
+def board(store, s, w, h, now, sel=None, show_all=False, layout="lista"):
+    """Panel del lead y sus subagentes sin flechas, en el diseño elegido."""
+    cv = Canvas(w, h)
+    if s is None:
+        cv.put(2, 2, "sin sesiones todavía — abre Claude Code en otra terminal", DIM)
+        return cv.text()
+    phase = int(now * 9)
+    everyone = store.agents(s)
+    agents = store.visible(s, now, show_all, sel)
+    y = lead_block(cv, store, s, w, now, phase, compact=layout == "tiempo" or h < 18)
+    empty = "sin subagentes en uso" + (" — t muestra los terminados" if everyone else "")
+
+    if layout == "tabla":
+        shown = pick(agents, max(1, h - y - 2), sel)
+        agents_header(cv, y, w, everyone, agents, shown, w)
+        flex = max(20, w - 4 - 12 - 11 - 7 - 6)
+        c_task, c_now = flex // 2, flex - flex // 2
+        cols = [(4, "TIPO", 12), (16, "MODELO", 11), (27, "TAREA", c_task), (27 + c_task, "AHORA", c_now)]
+        for x, name, _ in cols:
+            cv.put(x, y + 1, name, DIM)
+        cv.put(w - 12, y + 1, "TIEMPO TOOLS", DIM)
+        for i, v in enumerate(shown):
+            row, chosen = y + 2 + i, v["id"] == sel
+            icon, ist = agent_icon(v, phase, i)
+            text, tst = agent_now(v)
+            base = "bold" if chosen else FG if v["running"] else DIM
+            if chosen:
+                cv.put(0, row, "▸" + " " * (w - 1), f"bold {LEAD} on {CARD_BG}")
+            bg = f" on {CARD_BG}" if chosen else ""
+            cv.put(2, row, icon, ist + bg)
+            cv.put(4, row, trunc(v["type"], 11), (f"bold {SWARM}" if v["running"] else base) + bg)
+            cv.put(16, row, trunc(v["model"] or "—", 10), base + bg)
+            cv.put(27, row, trunc(v["desc"], c_task - 1), base + bg)
+            cv.put(27 + c_task, row, trunc(text, c_now - 1), tst + bg)
+            cv.put(w - 12, row, f"{agent_time(v, now):>6} {v['tools']:>5}", base + bg)
+        if not shown:
+            cv.put(2, y + 2, empty, DIM)
+
+    elif layout == "tarjetas":
+        per_row = max(1, min(4, w // 34))
+        cw = (w - (per_row - 1) * 2) // per_row
+        shown = pick(agents, max(1, (h - y - 1) // 5) * per_row, sel)
+        agents_header(cv, y, w, everyone, agents, shown, w)
+        for i, v in enumerate(shown):
+            x, top = (i % per_row) * (cw + 2), y + 1 + (i // per_row) * 5
+            chosen = v["id"] == sel
+            failed = bool(v["end"]) and v["status"] != "completed"
+            edge = "bold #ffffff" if chosen else breath(SWARM, now) if v["running"] else ERR if failed else LINE
+            cv.box(x, top, cw, 5, edge, heavy=chosen)
+            icon, ist = agent_icon(v, phase, i)
+            head = trunc(v["type"] + (f" · {v['model']}" if v["model"] else ""), cw - 9)
+            segs(cv, x + 2, top, [(" ", ""), (icon, ist), (f" {head} ", f"bold {SWARM}" if v["running"] else "bold")])
+            text, tst = agent_now(v)
+            cv.put(x + 2, top + 1, trunc(v["desc"], cw - 4), FG if v["running"] or chosen else DIM)
+            cv.put(x + 2, top + 2, trunc(text, cw - 4), tst)
+            cv.put(x + 2, top + 3, trunc(f"{agent_time(v, now)} · {n_tools(v['tools'])}", cw - 4),
+                   SWARM if v["running"] else DIM)
+        if not shown:
+            cv.put(2, y + 2, empty, DIM)
+
+    elif layout == "tiempo":
+        lw = min(20, max(12, w // 5))
+        bw = w - lw - 1
+        shown = pick(agents, max(1, (h - y - 4) // 2), sel)
+        t0, t1 = time_window(shown, now)
+        time_axis(cv, lw, y, bw, t0, t1)
+        cv.put(lw, y + 1, "".join("┊" if i % max(1, bw // 3) == 0 else " " for i in range(bw)), LINE)
+        cv.put(0, y + 2, "lead", f"bold {LEAD}")
+        cells = ["░"] * bw
+        spans = list(s.turn_spans) + ([(s.turn_start, now)] if s.turn_start and store.state(s) == "busy" else [])
+        for a, b in spans:
+            if b < t0:
+                continue
+            lo = max(0, int((a - t0) / (t1 - t0) * bw))
+            hi = min(bw, max(lo + 1, int((b - t0) / (t1 - t0) * bw)))
+            cells[lo:hi] = ["█"] * (hi - lo)
+        for i, c in enumerate(cells):
+            cv.put(lw + i, y + 2, c, LEAD if c == "█" else LINE)
+        for i, v in enumerate(shown):
+            row, chosen = y + 4 + i * 2, v["id"] == sel
+            icon, ist = agent_icon(v, phase, i)
+            segs(cv, 0, row, [("▸ " if chosen else "  ", f"bold {LEAD}"), (icon + " ", ist),
+                              (trunc(v["type"], lw - 5), "bold" if chosen or v["running"] else DIM)])
+            time_bar(cv, lw, row, bw, t0, t1, v["start"], v["end"], agent_bar_style(v, now), v["running"])
+            text, tst = agent_now(v)
+            cv.put(lw, row + 1, trunc(f"{v['desc']} · {text} · {agent_time(v, now)}", bw),
+                   FG if chosen else tst if v["running"] else DIM)
+        note = empty if not shown else ""
+        if len(agents) > len(shown):
+            note = f"+{len(agents) - len(shown)} más · ←→"
+        elif len(everyone) > len(agents):
+            gone = len(everyone) - len(agents)
+            note = (note + " · " if note else "") + f"{gone} oculto{'s' if gone != 1 else ''} · t"
+        cv.put(2 if not shown else 0, h - 1 if shown else y + 4, trunc(note, w), DIM)
+
+    else:  # lista: dos líneas por subagente y una barra de tiempo a la derecha
+        bw = min(40, max(16, w // 3))
+        bx = w - bw
+        shown = pick(agents, max(1, (h - y - 1) // 2), sel)
+        agents_header(cv, y, w, everyone, agents, shown, bx - 1)
+        t0, t1 = time_window(shown, now)
+        if shown:
+            time_axis(cv, bx, y, bw, t0, t1)
+        for i, v in enumerate(shown):
+            row, chosen = y + 1 + i * 2, v["id"] == sel
+            icon, ist = agent_icon(v, phase, i)
+            base = "bold" if chosen else FG if v["running"] else DIM
+            x = segs(cv, 0, row, [("▸ " if chosen else "  ", f"bold {LEAD}"), (icon + " ", ist),
+                                  (f"{trunc(v['type'], 11):<12}", f"bold {SWARM}" if v["running"] else base),
+                                  (f"{trunc(v['model'] or '—', 9):<10}", base)])
+            cv.put(x, row, trunc(v["desc"], max(0, bx - x - 2)), base)
+            time_bar(cv, bx, row, bw, t0, t1, v["start"], v["end"], agent_bar_style(v, now), v["running"])
+            text, tst = agent_now(v)
+            tail = f" · {n_tools(v['tools'])} · {agent_time(v, now)}"
+            cv.put(x, row + 1, trunc(text, max(0, w - x - len(tail))), tst)
+            cv.put(x + len(trunc(text, max(0, w - x - len(tail)))), row + 1, tail, DIM)
+        if not shown:
+            cv.put(2, y + 2, empty, DIM)
     return cv.text()
 
 
@@ -1403,7 +1677,7 @@ def footer(store, s, auto, account, now, sel=False, hint=None):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "s log · v conversación · ←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "d diseño · s log · v conversación · ←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
@@ -1422,6 +1696,7 @@ def mode_hint(ui):
 
 def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
+            "layout": "lista",  # diseño del panel de agentes (tecla d)
             "session": None,  # conversación abierta (v): {"top", "rows", "last", "pane": "list" | "out"}
             "log": None}      # cursor en el log (s): {"cur": evento | None, "scroll", "rows", "pane"}
 
@@ -1475,9 +1750,14 @@ def render(console, store, focus_sid, account, now, ui=None):
     else:
         diag = None
     if diag is None:
-        diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now, ui["sel"], ui["all"]),
-                     box=box.SQUARE, border_style=LINE,
-                     title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left")
+        inner = max(40, width - side_w - 4)
+        if ui["layout"] == "diagrama":
+            body = diagram(store, focus, inner, compact, now, ui["sel"], ui["all"])
+        else:
+            body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"])
+        diag = Panel(body, box=box.SQUARE, border_style=LINE,
+                     title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left",
+                     subtitle=f"diseño: {ui['layout']} · d cambia", subtitle_align="right")
     if wide:
         side = Layout(size=side_w)
         active = ui["session"] is not None and ui["session"]["pane"] == "list"
@@ -1518,19 +1798,20 @@ def split_keys(raw):
     return re.findall(rb"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|[\x00-\xff]", raw, re.S)
 
 
-def run(accounts, once):
+def run(accounts, once, cfg):
     console = Console()
     store = Store(accounts)
     store.poll(time.time())
     account = None
+    ui = new_ui()
+    ui["layout"] = cfg["layout"]
     if once or not sys.stdout.isatty():
-        console.print(render(console, store, None, account, time.time())[0])
+        console.print(render(console, store, None, account, time.time(), ui)[0])
         return
 
     fd = sys.stdin.fileno() if termios is not None and sys.stdin.isatty() else None
     saved = termios.tcgetattr(fd) if fd is not None else None
     focus_sid = None
-    ui = new_ui()
     queue = deque()  # teclas leídas y aún sin procesar
     try:
         if fd is not None:
@@ -1650,6 +1931,13 @@ def run(accounts, once):
                     ui["all"] = not ui["all"]
                 elif keys == b"f":
                     ui["only"] = not ui["only"]
+                elif keys == b"d":
+                    ui["layout"] = LAYOUTS[(LAYOUTS.index(ui["layout"]) + 1) % len(LAYOUTS)]
+                    cfg["layout"] = ui["layout"]
+                    try:
+                        save_config(cfg)
+                    except OSError:
+                        pass
                 elif keys in (b" ", b"\x1b[6~"):
                     ui["scroll"] += page
                 elif keys in (b"b", b"\x1b[5~"):
@@ -1694,6 +1982,7 @@ def main():
     ap.add_argument("--version", action="version", version=f"cc-dash {__version__}")
     ap.add_argument("--once", action="store_true", help="imprime un solo fotograma y sale")
     ap.add_argument("--no-update", action="store_true", help="no busca actualizaciones al arrancar")
+    ap.add_argument("--layout", choices=LAYOUTS, help="diseño del panel de agentes para esta ejecución")
     ap.add_argument("-a", "--account", action="append", metavar="CUENTA",
                     help="muestra solo esta cuenta (repetible)")
     sub = ap.add_subparsers(dest="cmd")
@@ -1757,7 +2046,9 @@ def main():
         sys.exit("cc-dash: no hay cuentas; registra una con `cc-dash add NOMBRE RUTA`")
     if cfg["auto_update"] and not args.no_update and not args.once and sys.stdout.isatty():
         auto_update()
-    run(accounts, args.once)
+    if args.layout:
+        cfg["layout"] = args.layout
+    run(accounts, args.once, cfg)
 
 
 if __name__ == "__main__":
