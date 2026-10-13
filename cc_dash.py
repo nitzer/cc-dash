@@ -12,6 +12,7 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         o muestra la lista de tareas de la sesión (hechas, en curso y pendientes)
         n muestra el registro de novedades · x cierra todos los toasts
         X apaga o enciende los toasts de forma permanente
+        , abre la ventana de configuración (j/k mover, h/l cambiar, r por defecto, Esc cerrar)
         / busca en el log (Enter aplica, Esc borra) · y copia lo que se está viendo
         E activa o apaga los efectos (arranque, glitch en avisos, lluvia en reposo)
         Enter salta al panel de tmux de la sesión enfocada
@@ -64,7 +65,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2163,7 +2164,7 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "Enter ir · s log · o tareas · n novedades · x cierra toasts · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = ", config · Enter ir · s log · o tareas · n novedades · x cierra toasts · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
@@ -2176,8 +2177,9 @@ def query(ui):
 class Overlay:
     """Dibuja los toasts apilados en la esquina superior derecha, encima del resto."""
 
-    def __init__(self, base, toasts, width, top=3):
+    def __init__(self, base, toasts, width, top=3, modal=None, modal_width=0):
         self.base, self.toasts, self.width, self.top = base, toasts, width, top
+        self.modal, self.modal_width = modal, modal_width   # ventana centrada, por encima de todo
 
     def __rich_console__(self, console, options):
         lines = console.render_lines(self.base, options, pad=True)
@@ -2190,9 +2192,103 @@ class Overlay:
                 parts = list(Segment.divide(lines[y], [x, x + self.width, options.max_width]))
                 lines[y] = parts[0] + row + (parts[2] if len(parts) > 2 else [])
                 y += 1
+        if self.modal is not None:
+            w = min(self.modal_width, options.max_width - 2)
+            rows = console.render_lines(self.modal, options.update(width=w, height=None), pad=True)
+            x = (options.max_width - w) // 2
+            y = max(0, (len(lines) - len(rows)) // 2)
+            for row in rows[: max(0, len(lines) - y)]:
+                parts = list(Segment.divide(lines[y], [x, x + w, options.max_width]))
+                lines[y] = parts[0] + row + (parts[2] if len(parts) > 2 else [])
+                y += 1
         for line in lines:
             yield from line
             yield Segment.line()
+
+
+# (clave, nombre, tipo, opciones o paso, valor por defecto, ayuda); None separa secciones
+SETTINGS = [
+    ("theme", "Tema", "choice", list(THEMES), "clasico", "colores y marco de todo el dashboard"),
+    ("layout", "Diseño de agentes", "choice", list(LAYOUTS), "lista", "cómo se dibuja el panel del lead y sus subagentes"),
+    ("toasts", "Toasts", "bool", None, True, "novedades como recuadros en la esquina; el registro (n) sigue igual"),
+    ("alerts", "Pitido y aviso de tmux", "bool", None, True, "suena y avisa en tmux con las novedades importantes"),
+    ("effects", "Efectos visuales", "bool", None, True, "arranque animado, glitch en los avisos y lluvia en reposo"),
+    ("auto_update", "Actualizarse al arrancar", "bool", None, True, "busca cambios en el repo al abrir el dashboard"),
+    None,
+    ("stuck_errors", "Errores seguidos", "int", 1, 3, "atasco: resultados con error seguidos (0 = no mirar)"),
+    ("stuck_repeat", "Llamadas repetidas", "int", 1, 4, "atasco: veces seguidas la misma llamada (0 = no mirar)"),
+    ("stuck_tool", "Herramienta sin volver", "int", 30, 300, "atasco: segundos que puede tardar una herramienta (0 = no mirar)"),
+    ("stuck_silent", "Sin actividad", "int", 30, 180, "atasco: segundos trabajando sin escribir nada (0 = no mirar)"),
+    None,
+    ("hide_after", "Ocultar subagente tras", "int", 10, 60, "segundos que un subagente terminado sigue a la vista"),
+    ("toast_seconds", "Duración de un toast", "int", 1, 8, "segundos que un toast sigue en pantalla"),
+    ("toast_max", "Toasts a la vez", "int", 1, 4, "cuántos toasts caben apilados"),
+]
+SETTING_ROWS = [item for item in SETTINGS if item is not None]
+
+
+def settings_panel(cfg, view, width):
+    """Ventana flotante de configuración: cada cambio se aplica y se guarda al momento."""
+    body = Text(no_wrap=True, overflow="ellipsis")
+    chosen = SETTING_ROWS[view["at"]]
+    name_w = 26
+    for item in SETTINGS:
+        if item is None:
+            body.append("\n")
+            continue
+        key, name, kind, _, default, _ = item
+        picked = item is chosen
+        value = cfg[key]
+        shown = ("sí" if value else "no") if kind == "bool" else f"{value} s" if kind == "int" and key not in (
+            "stuck_errors", "stuck_repeat", "toast_max") else str(value)
+        if kind == "int" and value == 0 and key.startswith("stuck"):
+            shown = "apagado"
+        line = Text(no_wrap=True)
+        line.append(" ▸ " if picked else "   ", style=f"bold {LEAD}")
+        line.append(f"{name:<{name_w}}", style="bold" if picked else FG)
+        line.append("◂ " if picked else "  ", style=LEAD)
+        color = (TOOL if value else ERR) if kind == "bool" else SWARM
+        line.append(shown, style=f"bold {color}")
+        line.append(" ▸" if picked else "", style=LEAD)
+        if value != default:
+            line.append("  ·  modificado", style=DIM)
+        if picked:
+            line.pad_right(max(0, width - 4 - len(line.plain)))
+            line.stylize(f"on {LINE}")
+        body.append_text(line)
+        body.append("\n")
+    body.append("\n " + trunc(chosen[5], width - 6) + "\n", style=DIM)
+    body.append(" " + trunc("j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar", width - 6), style=DIM)
+    return Panel(body, title=label("configuración", "CFG"), title_align="left", box=box.HEAVY,
+                 border_style=f"bold {LEAD}", style=f"on {CARD_BG}", width=width,
+                 subtitle="se guarda al cambiar", subtitle_align="right")
+
+
+def change_setting(cfg, item, step):
+    """Mueve un ajuste un paso (step=±1), o lo devuelve a su valor por defecto (step=0)."""
+    key, _, kind, extra, default, _ = item
+    if step == 0:
+        cfg[key] = default
+    elif kind == "bool":
+        cfg[key] = not cfg[key]
+    elif kind == "choice":
+        cfg[key] = extra[(extra.index(cfg[key]) + step) % len(extra)]
+    else:
+        cfg[key] = max(1 if key == "toast_max" else 0, cfg[key] + step * extra)
+
+
+def apply_config(cfg, ui):
+    """Lleva la configuración al dashboard en marcha y la guarda."""
+    ui["theme"], ui["layout"] = cfg["theme"], cfg["layout"]
+    ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
+    if not ui["toasts_on"]:
+        ui["toasts"].clear()
+    apply_theme(ui["theme"])
+    apply_limits(cfg)
+    try:
+        save_config(cfg)
+    except OSError:
+        pass
 
 
 def toast_panel(toast, width, now):
@@ -2233,6 +2329,8 @@ def news_panel(store, ui, rows, width, now):
 
 
 def mode_hint(ui):
+    if ui["settings"] is not None:
+        return "configuración: j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar"
     if ui["typing"] is not None:
         return f"buscar: {query(ui)}▌   Enter aplica · Esc borra el filtro"
     if ui["log"] is not None:
@@ -2250,6 +2348,8 @@ def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
+            "settings": None,             # ventana de configuración abierta: {"at": fila}
+            "cfg": None,                  # la configuración cargada, para dibujar esa ventana
             "toasts_on": True,            # si las novedades salen como toast (tecla X)
             "toasts": [],                 # novedades en pantalla: {"born", "kind", "who", "text"}
             "news": False,                # registro de novedades en lugar de la actividad (tecla n)
@@ -2335,9 +2435,11 @@ def render(console, store, focus_sid, account, now, ui=None):
     else:
         root["mid"].update(diag)
     ui["toasts"][:] = [t for t in ui["toasts"] if now - t["born"] < TOAST_LIFE]
-    if ui["toasts"]:
+    modal = settings_panel(ui["cfg"], ui["settings"], min(66, width - 2)) if ui["settings"] is not None else None
+    if ui["toasts"] or modal is not None:
         tw = max(30, min(46, width // 2))
-        root = Overlay(root, [toast_panel(t, tw, now) for t in ui["toasts"]], tw)
+        root = Overlay(root, [toast_panel(t, tw, now) for t in ui["toasts"]], tw,
+                       modal=modal, modal_width=min(66, width - 2))
     return root, sessions, focus
 
 
@@ -2530,7 +2632,7 @@ def run(accounts, once, cfg):
     store.ready = True
     ui = new_ui()
     ui["layout"], ui["theme"], ui["alerts"] = cfg["layout"], cfg["theme"], cfg["alerts"]
-    ui["effects"], ui["toasts_on"] = cfg["effects"], cfg["toasts"]
+    ui["effects"], ui["toasts_on"], ui["cfg"] = cfg["effects"], cfg["toasts"], cfg
     apply_theme(ui["theme"])
     apply_limits(cfg)
     cfg_seen = [now_mtime(), 0.0]   # [mtime de la configuración, última vez que se miró]
@@ -2579,8 +2681,28 @@ def run(accounts, once, cfg):
                     if ui["log"] is not None:
                         ui["log"]["cur"], ui["log"]["scroll"] = None, 0
                     continue
+                if ui["settings"] is not None:
+                    # ventana de configuración: captura todas las teclas
+                    at = ui["settings"]["at"]
+                    item = SETTING_ROWS[at]
+                    if keys in (b",", b"\x1b", b"q"):
+                        ui["settings"] = None
+                    elif keys == b"\x03":
+                        break
+                    elif keys in (b"j", b"\x1b[B", b"\t"):
+                        ui["settings"]["at"] = (at + 1) % len(SETTING_ROWS)
+                    elif keys in (b"k", b"\x1b[A"):
+                        ui["settings"]["at"] = (at - 1) % len(SETTING_ROWS)
+                    elif keys in (b"l", b"\x1b[C", b"\r", b"\n", b" ", b"h", b"\x1b[D", b"r"):
+                        change_setting(cfg, item, 0 if keys == b"r" else -1 if keys in (b"h", b"\x1b[D") else 1)
+                        apply_config(cfg, ui)
+                        cfg_seen[0] = now_mtime()
+                    continue
                 if keys in (b"q", b"\x03"):
                     break
+                if keys == b",":
+                    ui["settings"] = {"at": 0}
+                    continue
                 if keys == b"/":
                     ui["typing"] = ui["find"].encode()
                     continue

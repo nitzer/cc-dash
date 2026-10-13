@@ -183,6 +183,11 @@ cc-dash set toasts false       # sin toasts (igual que la tecla X)
 | `toast_max` | 4 | toasts visibles a la vez |
 | `toasts`, `alerts`, `effects`, `auto_update` | true | interruptores |
 
+Dentro del dashboard, **`,`** abre una ventana flotante con todos estos
+ajustes más el tema y el diseño: `j`/`k` mueve, `h`/`l` cambia el valor,
+`Enter` alterna, `r` vuelve al valor por defecto y `Esc` cierra. Cada cambio
+se aplica y se guarda al momento.
+
 Los valores viven en `~/.config/cc-dash/config.toml`. Un dashboard abierto
 los relee en un par de segundos, sin reiniciarlo. `X` apaga o enciende los
 toasts de forma permanente; las novedades siguen llegando al registro (`n`).
