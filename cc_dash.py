@@ -6,6 +6,7 @@ sessions/*.json (sesiones abiertas) y projects/**/*.jsonl (modelo,
 herramientas, subagentes, tokens). Solo lectura: no toca ni envía nada.
 
 Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto · q sale
+        p abre el prompt de un subagente (←/→ subagente · ↑/↓ desplaza · p cierra)
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
 """
@@ -14,6 +15,7 @@ import glob
 import json
 import os
 import sys
+import textwrap
 import time
 import tomllib
 from datetime import datetime
@@ -34,7 +36,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -226,6 +228,10 @@ class Session:
         self.agents = []    # {id, type, desc, model, start, end}
         self.requests = set()
 
+    def sorted_agents(self):
+        """En marcha primero, luego los más recientes."""
+        return sorted(self.agents, key=lambda a: (a["end"] is not None, -(a["start"] or 0)))
+
     def running_agents(self):
         return [a for a in self.agents if a["end"] is None]
 
@@ -367,6 +373,7 @@ class Store:
                             "id": b.get("id"), "start": ts, "end": None,
                             "type": inp.get("subagent_type") or "general",
                             "desc": inp.get("description") or "",
+                            "prompt": inp.get("prompt") or "",
                             "model": inp.get("model") or "",
                         })
                         self.event(ts, sid, SWARM, "Agent", f"▶ {label}")
@@ -538,7 +545,7 @@ def diagram(store, s, w, compact, now):
         cv.put(lx + 2, 3, trunc(s.title or "—", inner), DIM)
 
     # subagentes
-    agents = sorted(s.agents, key=lambda a: (a["end"] is not None, -(a["start"] or 0)))
+    agents = s.sorted_agents()
     running = s.running_agents() if state != "ended" else []
     shown = agents[:SLOTS]
     sgap = 2
@@ -654,7 +661,33 @@ def log_panel(store, focus, account, rows, width, now):
     return Panel(body, title="session log", title_align="left", box=box.SQUARE, border_style=LINE)
 
 
-def footer(store, s, auto, account, now):
+def prompt_panel(s, view, rows, width, now):
+    """Prompt completo de un subagente. Ajusta view["agent"] y view["scroll"]."""
+    agents = s.sorted_agents() if s else []
+    if not agents:
+        view["agent"], view["scroll"] = None, 0
+        body = Text("esta sesión no ha lanzado subagentes", style=DIM)
+        return Panel(body, title="prompt", title_align="left", box=box.SQUARE, border_style=SWARM)
+    i = next((n for n, a in enumerate(agents) if a["id"] == view["agent"]), 0)
+    a = agents[i]
+    view["agent"] = a["id"]
+    lines = []
+    for raw in (a["prompt"] or "(prompt vacío)").splitlines() or [""]:
+        lines += textwrap.wrap(raw, max(20, width - 4), replace_whitespace=False,
+                               drop_whitespace=False) or [""]
+    top = max(0, min(view["scroll"], len(lines) - rows))
+    view["scroll"] = top
+    body = Text("\n".join(lines[top: top + rows]), style=FG, no_wrap=True, overflow="ellipsis")
+    status = clock(now - a["start"]) + " en marcha" if a["end"] is None else "✓ " + clock(a["end"] - a["start"])
+    head = f"prompt {i + 1}/{len(agents)} · {a['type']}" + (f" · {a['model']}" if a["model"] else "")
+    title = trunc(f"{head} · {a['desc']} · {status}", max(10, width - 6))
+    more = len(lines) - top - rows
+    pos = f"líneas {top + 1}–{min(len(lines), top + rows)} de {len(lines)}" + (f" · {more} más ↓" if more > 0 else "")
+    return Panel(body, title=title, title_align="left", subtitle=pos, subtitle_align="right",
+                 box=box.SQUARE, border_style=SWARM)
+
+
+def footer(store, s, auto, account, now, prompt=False):
     t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         t.append("q salir", style=DIM)
@@ -673,16 +706,28 @@ def footer(store, s, auto, account, now):
     field("tools", len(s.pending) if state != "ended" else 0, TOOL)
     if store.multi:
         field("cuenta", account or "todas", ADVISOR)
-    keys = "↑↓ sesión · c cuenta · a auto · q salir" if store.multi else "↑↓ sesión · a auto · q salir"
+    if prompt:
+        t.append("   ←→ subagente · ↑↓ desplaza · p cierra · q salir", style=DIM)
+        return t
+    keys = "↑↓ sesión · p prompt · c cuenta · a auto · q salir" if store.multi else "↑↓ sesión · p prompt · a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
-def render(console, store, focus_sid, account, now):
+def render(console, store, focus_sid, account, now, view=None):
     width, height = console.size
     sessions = store.ordered(account)
     by_id = {s.sid: s for s in sessions}
     focus = by_id.get(focus_sid) or store.auto_focus(sessions)
+    if view is not None:
+        view["rows"] = max(1, height - 3 - 1 - 2)
+        root = Layout()
+        root.split_column(
+            Layout(header(store, sessions, account, now), name="head", size=3),
+            Layout(prompt_panel(focus, view, view["rows"], width, now), name="prompt"),
+            Layout(footer(store, focus, focus_sid is None, account, now, prompt=True), name="foot", size=1),
+        )
+        return root, sessions, focus
     compact = height < 32
     dh = 14 if compact else 20
     wide = width >= 108
@@ -718,7 +763,9 @@ def read_keys(fd, timeout):
         keys = ""
         while msvcrt.kbhit():
             keys += msvcrt.getwch()
-        return {"\xe0H": b"k", "\xe0P": b"j"}.get(keys, keys.encode("utf-8", "ignore"))
+        arrows = {"\xe0H": b"k", "\xe0P": b"j", "\xe0K": b"h", "\xe0M": b"l",
+                  "\xe0I": b"\x1b[5~", "\xe0Q": b"\x1b[6~"}
+        return arrows.get(keys, keys.encode("utf-8", "ignore"))
     if fd is None:
         time.sleep(timeout)
         return b""
@@ -738,6 +785,7 @@ def run(accounts, once):
     fd = sys.stdin.fileno() if termios is not None and sys.stdin.isatty() else None
     saved = termios.tcgetattr(fd) if fd is not None else None
     focus_sid = None
+    view = None  # con el prompt abierto: {"agent": id, "scroll": n, "rows": n}
     try:
         if fd is not None:
             tty.setcbreak(fd)
@@ -745,13 +793,35 @@ def run(accounts, once):
             while True:
                 now = time.time()
                 store.poll(now)
-                root, sessions, focus = render(console, store, focus_sid, account, now)
+                root, sessions, focus = render(console, store, focus_sid, account, now, view)
                 live.update(root, refresh=True)
                 keys = read_keys(fd, 0.12)
                 if not keys:
                     continue
                 if b"q" in keys or b"\x03" in keys:
                     break
+                if view is not None:
+                    agents = focus.sorted_agents() if focus else []
+                    page = max(1, view["rows"] - 2)
+                    if keys in (b"p", b"\x1b"):
+                        view = None
+                    elif keys in (b"j", b"\x1b[B"):
+                        view["scroll"] += 1
+                    elif keys in (b"k", b"\x1b[A"):
+                        view["scroll"] = max(0, view["scroll"] - 1)
+                    elif keys in (b" ", b"\x1b[6~"):
+                        view["scroll"] += page
+                    elif keys in (b"b", b"\x1b[5~"):
+                        view["scroll"] = max(0, view["scroll"] - page)
+                    elif keys in (b"l", b"h", b"\t", b"\x1b[C", b"\x1b[D") and agents:
+                        i = next((n for n, a in enumerate(agents) if a["id"] == view["agent"]), 0)
+                        step = -1 if keys in (b"h", b"\x1b[D") else 1
+                        view = {"agent": agents[(i + step) % len(agents)]["id"], "scroll": 0, "rows": view["rows"]}
+                    continue
+                if keys == b"p":
+                    focus_sid = focus.sid if focus else None
+                    view = {"agent": None, "scroll": 0, "rows": 1}
+                    continue
                 if b"a" in keys:
                     focus_sid = None
                 if b"c" in keys and store.multi:

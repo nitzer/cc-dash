@@ -28,7 +28,7 @@ cc-dash -a personal     # solo una cuenta (repetible)
 cc-dash --once          # imprime un fotograma y sale
 ```
 
-Teclas: `↑`/`↓` o `j`/`k` cambia de sesión · `c` filtra por cuenta ·
+Teclas: `↑`/`↓` o `j`/`k` cambia de sesión · `p` abre el prompt de un subagente · `c` filtra por cuenta ·
 `a` vuelve al modo automático · `q` sale.
 
 ## Cuentas
