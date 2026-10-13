@@ -9,6 +9,8 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
+        f limita el log a la sesión enfocada (con un subagente seleccionado,
+          el log muestra solo lo de ese subagente)
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
@@ -43,7 +45,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -456,8 +458,9 @@ class Store:
                 live[sid] = info
         self.live = live
 
-    def event(self, ts, sid, style, tag, text):
-        self.log.append((ts, sid, style, tag, text))
+    def event(self, ts, sid, style, tag, text, agent=None):
+        """`agent`: id del lanzamiento o agentId del subagente al que pertenece el evento."""
+        self.log.append((ts, sid, style, tag, text, agent))
 
     def count_tool(self, s, name, inp):
         s.tools += 1
@@ -563,7 +566,7 @@ class Store:
                             "model": inp.get("model") or "",
                             "result": "", "status": "",
                         })
-                        self.event(ts, sid, SWARM, "Agent", f"▶ {label}")
+                        self.event(ts, sid, SWARM, "Agent", f"▶ {label}", b.get("id"))
                     else:
                         s.pending[b.get("id")] = (short_tool(name), label, ts)
                         self.event(ts, sid, DIM if side else TOOL,
@@ -625,7 +628,7 @@ class Store:
                 info["done"] = None
                 self.count_tool(s, name, inp)
                 self.event(ts, s.sid, DIM, "↳ " + (self.agent_type.get(aid) or "agente"),
-                           f"{info['tool'][0]}: {info['tool'][1]}")
+                           f"{info['tool'][0]}: {info['tool'][1]}", aid)
 
     def task_done(self, s, text, ts):
         task = re.search(r"<task-id>([^<]+)</task-id>", text)
@@ -641,7 +644,7 @@ class Store:
         a["status"] = status
         ok = status == "completed"
         self.event(ts, s.sid, SWARM if ok else ERR, "Agent",
-                   f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})")
+                   f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})", a["id"])
 
     # -- vistas --
     def state(self, s):
@@ -960,21 +963,36 @@ def side_panel(store, sessions, focus, rows, now):
     return Panel(body, title="sesiones", title_align="left", box=box.SQUARE, border_style=LINE)
 
 
-def log_panel(store, focus, account, rows, width, now):
+def log_panel(store, focus, account, rows, width, now, agent=None, only_focus=False):
+    """Log general; con `agent` solo lo de ese subagente, con `only_focus` solo la sesión enfocada."""
     body = Text(no_wrap=True, overflow="ellipsis")
-    col = 22 if store.multi else 14
-    events = [e for e in store.log if account in (None, getattr(store.sessions.get(e[1]), "account", None))]
+    title = "session log"
+    if agent is not None:
+        own = {agent["id"], agent["aid"]} - {None}
+        events = [e for e in store.log if e[5] in own]
+        title += f" · solo {agent['type']}: {agent['desc']}"
+    elif only_focus and focus is not None:
+        events = [e for e in store.log if e[1] == focus.sid]
+        title += f" · solo {store.label(focus)} · f para ver todo"
+    else:
+        events = [e for e in store.log if account in (None, getattr(store.sessions.get(e[1]), "account", None))]
+    narrowed = agent is not None or (only_focus and focus is not None)
+    col = 0 if narrowed else 22 if store.multi else 14
     events = events[-rows:] if rows > 0 else []
-    for i, (ts, sid, style, tag, text) in enumerate(events):
+    for i, (ts, sid, style, tag, text, _) in enumerate(events):
         s = store.sessions.get(sid)
-        name = trunc(store.label(s), col) if s else sid[:8]
         body.append(time.strftime("%H:%M:%S", time.localtime(ts)) + " ", style=DIM)
-        body.append(f"{name:<{col}} ", style=FG if s is focus else DIM)
+        if col:
+            name = trunc(store.label(s), col) if s else sid[:8]
+            body.append(f"{name:<{col}} ", style=FG if s is focus else DIM)
         body.append(f"{trunc(tag, 10):<10} ", style=style)
-        body.append(trunc(text, max(10, width - 26 - col)), style=FG if s is focus else DIM)
+        body.append(trunc(text, max(10, width - 25 - col)), style=FG if s is focus else DIM)
         if i < len(events) - 1:
             body.append("\n")
-    return Panel(body, title="session log", title_align="left", box=box.SQUARE, border_style=LINE)
+    if not events:
+        body.append("sin eventos todavía", style=DIM)
+    return Panel(body, title=trunc(title, max(10, width - 6)), title_align="left", box=box.SQUARE,
+                 border_style=SWARM if agent is not None else LINE)
 
 
 def stats_panel(store, s, now):
@@ -1099,13 +1117,13 @@ def footer(store, s, auto, account, now, sel=False):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "←→ subagentes · t terminados · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
 def new_ui():
-    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False}
+    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False}
 
 
 def render(console, store, focus_sid, account, now, ui=None):
@@ -1123,7 +1141,9 @@ def render(console, store, focus_sid, account, now, ui=None):
     detail_w = max(44, width * 2 // 5) if split else width
 
     detail = detail_panel(store, focus, ui, rows, detail_w, now)
-    log = log_panel(store, focus, account, rows, width - detail_w if split else width, now)
+    chosen = next((v for v in store.visible(focus, now, ui["all"], ui["sel"]) if v["id"] == ui["sel"]), None)
+    log = log_panel(store, focus, account, rows, width - detail_w if split else width, now,
+                    agent=chosen, only_focus=ui["only"])
     bottom = Layout(name="bottom")
     if split:
         bottom.split_row(Layout(log), Layout(detail, size=detail_w))
@@ -1216,6 +1236,8 @@ def run(accounts, once):
                     ui["info"] = not ui["info"]
                 elif keys == b"t":
                     ui["all"] = not ui["all"]
+                elif keys == b"f":
+                    ui["only"] = not ui["only"]
                 elif keys in (b" ", b"\x1b[6~"):
                     ui["scroll"] += page
                 elif keys in (b"b", b"\x1b[5~"):

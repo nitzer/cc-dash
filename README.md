@@ -49,6 +49,8 @@ Teclas:
 - `t`: muestra u oculta los subagentes ya terminados (se retiran solos del
   diagrama un minuto después de acabar)
 - `AvPág`/`RePág` (o espacio/`b`): desplaza el detalle
+- `f`: limita el log a la sesión enfocada; con un subagente seleccionado el
+  log muestra solo lo de ese subagente
 - `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
