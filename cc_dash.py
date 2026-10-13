@@ -53,7 +53,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -65,10 +65,15 @@ ADVISOR = "#b48efc"
 ERR = "#ef6b73"
 DIM = "#5c6680"
 LINE = "#3b4560"
+WAIT = "#f2c94c"      # una sesión detenida esperando al usuario
 CARD_BG = "#1c2740"   # fondo de la tarjeta de detalles de la sesión
 FG = "#c9d1e4"
 
 AGENT_TOOLS = ("Agent", "Task")
+ASK_TOOLS = {"AskUserQuestion": "responder una pregunta", "ExitPlanMode": "aprobar el plan"}
+# estado -> (icono, texto, color)
+STATES = {"waiting": ("◆", "espera tu respuesta", WAIT), "busy": ("●", "trabajando", LEAD),
+          "idle": ("○", "esperando prompt", TOOL), "ended": ("·", "cerrada", DIM)}
 MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
@@ -723,7 +728,22 @@ class Store:
         info = self.live.get(s.sid)
         if not info:
             return "ended"
-        return "busy" if info.get("status") == "busy" else "idle"
+        status = info.get("status")
+        # Claude Code escribe "waiting" cuando hay un permiso, pregunta o diálogo pendiente;
+        # el segundo caso cubre versiones que no lo hacen.
+        if status == "waiting" or (status == "busy" and any(p[0] in ASK_TOOLS for p in s.pending.values())):
+            return "waiting"
+        return "busy" if status == "busy" else "idle"
+
+    def waiting_for(self, s):
+        """Qué necesita del usuario una sesión en estado "waiting"."""
+        raw = (self.live.get(s.sid) or {}).get("waitingFor") or ""
+        tool = max(s.pending.values(), key=lambda p: p[2]) if s.pending else None
+        if tool and tool[0] in ASK_TOOLS:
+            return ASK_TOOLS[tool[0]]
+        if raw == "permission prompt":
+            return f"permiso para {tool[0]}" + (f": {tool[1]}" if tool[1] else "") if tool else "un permiso"
+        return {"input needed": "una respuesta", "dialog open": "cerrar un diálogo"}.get(raw, raw or "tu respuesta")
 
     def agents(self, s):
         """Subagentes de la sesión con su actividad: en marcha primero, luego recientes."""
@@ -772,7 +792,7 @@ class Store:
     def auto_focus(self, sessions):
         if not sessions:
             return None
-        rank = {"busy": 2, "idle": 1, "ended": 0}
+        rank = {"waiting": 3, "busy": 2, "idle": 1, "ended": 0}
         return max(sessions, key=lambda s: (rank[self.state(s)], s.last))
 
 
@@ -885,16 +905,18 @@ def diagram(store, s, w, compact, now, sel=None, show_all=False):
 
     # lead
     lw = w - lx
-    lst = LEAD if state != "ended" else LINE
+    lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
     cv.box(lx, 0, lw, 5, lst)
     inner = lw - 4
     spin = SPIN[phase % len(SPIN)] if busy else "■"
     cv.put(lx + 2, 1, trunc(f"{spin} {short_model(s.model)} · lead", inner), f"bold {lst}")
-    label = {"busy": "trabajando", "idle": "esperando prompt", "ended": "cerrada"}[state]
+    label = STATES[state][1]
     meta = f"{store.label(s)} · {label}" + (f" · effort {s.effort}" if s.effort else "")
     cv.put(lx + 2, 2, trunc(meta, inner), FG)
     plain = [p for p in s.pending.values()]
-    if plain and state != "ended":
+    if state == "waiting":
+        cv.put(lx + 2, 3, trunc(f"◆ necesita {store.waiting_for(s)}", inner), f"bold {breath(WAIT, now)}")
+    elif plain and state != "ended":
         name, lab, t0 = max(plain, key=lambda p: p[2])
         more = f" (+{len(plain) - 1})" if len(plain) > 1 else ""
         cv.put(lx + 2, 3, trunc(f"▶ {name}{more}: {lab}", inner), TOOL)
@@ -1048,9 +1070,9 @@ def agent_bar_style(v, now):
 def lead_block(cv, store, s, w, now, phase, compact=False):
     """Cabecera del lead (3 líneas, o 1 en `compact`). Devuelve la siguiente fila libre."""
     state = store.state(s)
-    color = LEAD if state != "ended" else DIM
-    label = {"busy": "trabajando", "idle": "esperando prompt", "ended": "cerrada"}[state]
-    spin = SPIN[phase % len(SPIN)] if state == "busy" else "■"
+    color = WAIT if state == "waiting" else LEAD if state != "ended" else DIM
+    label = STATES[state][1]
+    spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {label} · {s.turns} turno{'s' if s.turns != 1 else ''}"
     pct = min(100, round(100 * s.ctx / s.window())) if s.ctx else 0
     if compact:
@@ -1063,7 +1085,9 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     who = short_model(s.model) + (f" · effort {s.effort}" if s.effort else "") + f" · {store.label(s)}"
     cv.put(x, 0, trunc(who, max(0, w - x - len(right) - 2)), "bold")
     cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
-    if s.pending and state != "ended":
+    if state == "waiting":
+        cv.put(0, 1, trunc(f"◆ necesita {store.waiting_for(s)}", w), f"bold {breath(WAIT, now)}")
+    elif s.pending and state != "ended":
         name, lab, _ = max(s.pending.values(), key=lambda p: p[2])
         more = f" (+{len(s.pending) - 1})" if len(s.pending) > 1 else ""
         cv.put(0, 1, trunc(f"▶ {name}{more}: {lab}", w), TOOL)
@@ -1204,7 +1228,7 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista"):
         cv.put(lw, y + 1, "".join("┊" if i % max(1, bw // 3) == 0 else " " for i in range(bw)), LINE)
         cv.put(0, y + 2, "lead", f"bold {LEAD}")
         cells = ["░"] * bw
-        spans = list(s.turn_spans) + ([(s.turn_start, now)] if s.turn_start and store.state(s) == "busy" else [])
+        spans = list(s.turn_spans) + ([(s.turn_start, now)] if s.turn_start and store.state(s) in ("busy", "waiting") else [])
         for a, b in spans:
             if b < t0:
                 continue
@@ -1271,6 +1295,10 @@ def header(store, sessions, account, now):
     title.append(f"{open_} SESIÓN ABIERTA" if open_ == 1 else f"{open_} SESIONES ABIERTAS", style=f"bold {LEAD}")
     title.append("  ·  ", style=DIM)
     title.append(f"{busy} TRABAJANDO", style=f"bold {SWARM if busy else DIM}")
+    waiting = sum(1 for s in sessions if store.state(s) == "waiting")
+    if waiting:
+        title.append("  ·  ", style=DIM)
+        title.append(f"◆ {waiting} ESPERA{'N' if waiting != 1 else ''} TU RESPUESTA", style=f"bold {breath(WAIT, now)}")
     title.append("  ·  ", style=DIM)
     title.append(time.strftime("%H:%M:%S", time.localtime(now)), style=DIM)
     legend = Text(justify="center")
@@ -1288,7 +1316,9 @@ def side_panel(store, sessions, focus, rows, now, active=False):
     first = max(0, at - fit + 1)   # la lista se desplaza para no perder el cursor
     for s in sessions[first: first + fit]:
         state = store.state(s)
-        dot, color = {"busy": ("●", LEAD), "idle": ("○", TOOL), "ended": ("·", DIM)}[state]
+        dot, _, color = STATES[state]
+        if state == "waiting":
+            color = f"bold {breath(WAIT, now)}"
         mark = "▸" if s is focus else " "
         when = age(now - s.last) if s.last else "—"
         name = trunc(store.label(s), width - 6 - len(when))
@@ -1296,7 +1326,10 @@ def side_panel(store, sessions, focus, rows, now, active=False):
         body.append(f"{dot} ", style=color)
         body.append(name, style="bold reverse" if s is focus else (FG if state != "ended" else DIM))
         body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=DIM)
-        body.append("    " + trunc(s.title or s.cwd.replace(HOME, "~") or "—", width - 4) + "\n", style=DIM)
+        if state == "waiting":
+            body.append("    " + trunc("necesita " + store.waiting_for(s), width - 4) + "\n", style=WAIT)
+        else:
+            body.append("    " + trunc(s.title or s.cwd.replace(HOME, "~") or "—", width - 4) + "\n", style=DIM)
     return Panel(body, title="sesiones", title_align="left", box=box.SQUARE,
                  border_style=LEAD if active else LINE)
 
@@ -1305,7 +1338,8 @@ def session_card(store, s, now):
     """Tarjeta de color con todos los datos de la sesión bajo el cursor. Devuelve (panel, alto)."""
     state = store.state(s)
     live = store.live.get(s.sid) or {}
-    label, color = {"busy": ("● trabajando", LEAD), "idle": ("○ esperando", TOOL), "ended": ("· cerrada", DIM)}[state]
+    label, color = {"waiting": "◆ te espera", "busy": "● trabajando", "idle": "○ esperando",
+                    "ended": "· cerrada"}[state], STATES[state][2]
     width = 30
     rows = []
 
@@ -1313,6 +1347,8 @@ def session_card(store, s, now):
         if value:
             rows.append((key, trunc(value, width - 10)))
 
+    if state == "waiting":
+        row("necesita", store.waiting_for(s))
     row("cuenta", s.account)
     row("carpeta", (s.cwd or "").replace(HOME, "~"))
     row("rama", s.branch)
@@ -1641,7 +1677,7 @@ def session_panel(store, s, view, rows, width, now):
         body.append(text + ("\n" if n < len(chunk) - 1 else ""), style=style or None)
     if not lines:
         body.append("esta sesión todavía no tiene conversación", style=DIM)
-    state = {"busy": "trabajando", "idle": "esperando prompt", "ended": "cerrada"}[store.state(s)]
+    state = STATES[store.state(s)][1]
     title = f"sesión · {store.label(s)} · {state}" + (f" · {s.title}" if s.title else "")
     if view["top"] is None:
         pos = "siguiendo en vivo" if store.state(s) != "ended" else "final"
@@ -1665,7 +1701,7 @@ def footer(store, s, auto, account, now, sel=False, hint=None):
         t.append(f"[{value}]", style=f"bold {color}")
 
     agents = store.agents(s)
-    field("lead", state, LEAD if state == "busy" else TOOL if state == "idle" else DIM)
+    field("lead", state, STATES[state][2])
     field("subagents", f"{sum(1 for v in agents if v['running'])}/{len(agents)}", SWARM)
     field("advisor", "on call" if s.advisor else "off", ADVISOR)
     field("tools", len(s.pending) if state != "ended" else 0, TOOL)

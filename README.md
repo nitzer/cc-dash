@@ -82,6 +82,14 @@ y líneas de código cambiadas.
 La ventana de contexto no figura en los transcripts: se asume 1M si el modelo
 lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
 
+## Sesiones que esperan tu respuesta
+
+Cuando una sesión se detiene a la espera de un permiso, una pregunta, la
+aprobación de un plan o un diálogo, se marca en amarillo con `◆`: en la
+cabecera (`◆ 1 ESPERA TU RESPUESTA`), en la lista de sesiones y en el panel
+del lead, con lo que necesita (`necesita permiso para Bash: …`). En modo
+automático el dashboard enfoca primero la sesión que espera.
+
 ## Cuentas
 
 Una cuenta es un directorio de configuración de Claude Code, es decir, el
