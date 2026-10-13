@@ -238,8 +238,10 @@ def git(src, *args, timeout=30):
 def update(quiet=False):
     """Trae cambios del repo y reinstala. Devuelve True si instaló algo nuevo."""
     def say(msg, error=False):
-        if not quiet or not error:
-            print(f"cc-dash: {msg}", file=sys.stderr if error else sys.stdout)
+        if error and not quiet:
+            sys.exit(f"cc-dash: {msg}")
+        if not error:
+            print(f"cc-dash: {msg}")
         return False
 
     src = source_dir()
