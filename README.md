@@ -97,6 +97,26 @@ lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
 - **Temas:** `T` cambia entre `clasico`, `neon`, `matrix` y `ambar`; los tres
   últimos usan un marco tipo HUD (solo esquinas). También `cc-dash --theme neon`.
 
+## Detector de atascos y ritmo de consumo
+
+Mientras una sesión trabaja, el dashboard la marca con `⚠` en rojo (cabecera,
+lista de sesiones, panel del lead y actividad) y lanza un aviso si:
+
+- acumula 3 resultados con error seguidos,
+- repite 4 veces seguidas la misma llamada con los mismos parámetros,
+- una herramienta lleva más de 5 minutos sin volver, o
+- lleva más de 3 minutos sin escribir nada en el transcript.
+
+Un subagente en marcha que lleva más de 5 minutos sin actividad se marca igual.
+Son sospechas, no certezas: un comando largo legítimo también dispara la
+tercera. Los umbrales son las constantes `STUCK_*` de `cc_dash.py`.
+
+El ritmo de consumo aparece junto al pulso (`tok/min`, media de los últimos 5
+minutos) y en el panel de actividad: tokens de salida de hoy en la sesión y en
+la cuenta, y cuántos turnos faltan para llenar el contexto al crecimiento
+medio de los últimos turnos. Solo cuenta tokens de salida, y los de los
+subagentes quedan fuera porque sus transcripts no los registran bien.
+
 ## Sesiones que esperan tu respuesta
 
 Cuando una sesión se detiene a la espera de un permiso, una pregunta, la

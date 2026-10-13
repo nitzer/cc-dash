@@ -55,7 +55,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -122,6 +122,11 @@ STATES = {"waiting": ("◆", "espera tu respuesta", "WAIT"), "busy": ("●", "tr
 def state_color(state):
     return THEME[STATES[state][2]]
 MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
+# Umbrales del detector de atascos (solo se evalúa mientras la sesión trabaja)
+STUCK_ERRORS = 3     # resultados con error seguidos
+STUCK_REPEAT = 4     # veces seguidas la misma llamada, con los mismos parámetros
+STUCK_TOOL = 300     # segundos que una herramienta puede tardar en volver
+STUCK_SILENT = 180   # segundos trabajando sin escribir nada en el transcript
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -428,6 +433,12 @@ class Session:
         self.pending = {}   # tool_use_id -> (name, label, ts)
         self.agents = []    # lanzamientos vistos en el transcript principal
         self.side = {}      # agentId -> actividad leída del transcript del subagente
+        self.err_streak = 0     # resultados con error seguidos
+        self.err_last = ""
+        self.rep_key = None     # última llamada (herramienta + parámetros) y cuántas veces seguidas
+        self.rep_n = 0
+        self.spend = deque(maxlen=3000)     # (momento, tokens de salida) para el ritmo de consumo
+        self.ctx_marks = deque(maxlen=8)    # contexto al cierre de cada turno
         self.beats = deque(maxlen=1500)  # momento de cada herramienta usada: el pulso de la sesión
         self.requests = {}  # requestId -> tokens de salida ya contados
         self.items = []     # conversación: prompts, texto del asistente y herramientas
@@ -448,7 +459,23 @@ class Session:
 
     def side_info(self, aid):
         return self.side.setdefault(aid, {"tools": 0, "tool": None, "text": "", "final": "",
-                                          "out": 0, "done": None, "model": ""})
+                                          "out": 0, "done": None, "model": "", "last": 0.0})
+
+    def token_rate(self, now, span=300):
+        """Tokens de salida por minuto en los últimos `span` segundos."""
+        return sum(n for t, n in self.spend if 0 <= now - t < span) * 60 / span
+
+    def tokens_today(self, now):
+        day = time.localtime(now)[:3]
+        return sum(n for t, n in self.spend if time.localtime(t)[:3] == day)
+
+    def turns_left(self):
+        """Turnos que faltan para llenar el contexto, al crecimiento medio de los últimos."""
+        marks = list(self.ctx_marks)
+        growth = [b - a for a, b in zip(marks, marks[1:]) if b > a]   # una compactación no cuenta
+        if not growth or not self.ctx:
+            return None
+        return max(0, int((self.window() - self.ctx) / (sum(growth) / len(growth))))
 
 
 class Store:
@@ -460,6 +487,7 @@ class Store:
         self.offsets = {}
         self.files = []     # (ruta, nombre de cuenta)
         self.live = {}      # sid -> info de ~/.claude/sessions
+        self.daily = Counter()   # (cuenta, (año, mes, día)) -> tokens de salida
         self.ready = False  # tras la carga inicial: desde ahí los fallos generan aviso
         self.alerts = []    # (sid, texto) pendientes de avisar
         self.aid_of = {}    # tool_use_id del lanzamiento -> agentId (de *.meta.json)
@@ -597,6 +625,10 @@ class Store:
             if delta > 0:
                 s.requests[rid] = out
                 s.out_tokens += delta
+                ts = parse_ts(o.get("timestamp"))
+                if ts:
+                    s.spend.append((ts, delta))
+                    self.daily[(s.account, time.localtime(ts)[:3])] += delta
                 if side is not None:
                     side["out"] += delta
         return usage
@@ -651,6 +683,8 @@ class Store:
             s.turns += 1
             s.turn_last = o.get("durationMs") or 0
             s.turn_total += s.turn_last
+            if s.ctx:
+                s.ctx_marks.append(s.ctx)
             if ts:
                 s.turn_spans.append((ts - s.turn_last / 1000, ts))
             s.turn_start = None
@@ -683,6 +717,9 @@ class Store:
                         item = s.open_items[b.get("id")] = s.add_item(
                             {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None,
                              "more": 0, "err": False, "out": None, "input": clip_input(inp)})
+                        key = (name, json.dumps(inp, sort_keys=True, default=str)[:600])
+                        s.rep_n = s.rep_n + 1 if key == s.rep_key else 1
+                        s.rep_key = key
                     else:
                         item = None
                     if name in AGENT_TOOLS and not side:
@@ -711,6 +748,8 @@ class Store:
                     s.turn_start = ts
                 if not side and not o.get("isMeta") and not content.lstrip().startswith("<"):
                     s.pending.clear()
+                    s.err_streak = s.rep_n = 0   # un prompt nuevo empieza de cero
+                    s.rep_key = None
                     item = s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
                     self.event(ts, sid, LEAD, "prompt", "› " + content, ref=item)
                 return
@@ -720,9 +759,13 @@ class Store:
                     continue
                 tid = b.get("tool_use_id")
                 item = self.attach(s, b)
+                done = s.pending.pop(tid, None)
                 if b.get("is_error"):
                     s.errors += 1
-                done = s.pending.pop(tid, None)
+                    s.err_streak += 1
+                    s.err_last = done[0] if done else ""
+                else:
+                    s.err_streak = 0
                 if done and b.get("is_error"):
                     self.event(ts, sid, ERR, done[0], "✗ " + (done[1] or "error"), ref=item)
                 for a in s.agents:
@@ -741,6 +784,7 @@ class Store:
     def ingest_side(self, s, aid, o, msg, content, ts):
         """Un mensaje del propio subagente (transcript en <sesión>/subagents/)."""
         info = s.side_info(aid)
+        info["last"] = max(info["last"], ts)
         if msg.get("model"):
             info["model"] = msg["model"]
         self.add_usage(s, o, msg, info)
@@ -821,6 +865,8 @@ class Store:
                 "model": a["model"] or (short_model(side["model"]) if side.get("model") else ""),
                 "status": a["status"] or ("completed" if end else ""),
                 "response": (side.get("final") or a["result"] or side.get("text") or "").strip(),
+                # segundos sin dar señales; solo importa mientras está en marcha
+                "quiet": time.time() - (side.get("last") or a["start"] or time.time()),
             })
         out.sort(key=lambda v: (not v["running"], -(v["start"] or 0)))
         return out
@@ -851,11 +897,29 @@ class Store:
         rest.sort(key=lambda s: -s.last)
         return live + rest
 
+    def stuck(self, s, now):
+        """Motivos para sospechar que una sesión que trabaja está atascada (vacío = todo bien)."""
+        if self.state(s) != "busy":
+            return []
+        why = []
+        if s.err_streak >= STUCK_ERRORS:
+            why.append(f"{s.err_streak} errores seguidos" + (f" en {s.err_last}" if s.err_last else ""))
+        if s.rep_n >= STUCK_REPEAT and s.rep_key:
+            why.append(f"repite {short_tool(s.rep_key[0])} {s.rep_n} veces igual")
+        if s.pending:
+            name, _, since = min(s.pending.values(), key=lambda p: p[2])
+            if since and now - since > STUCK_TOOL:
+                why.append(f"{name} lleva {age(now - since)} sin volver")
+        elif s.last and now - s.last > STUCK_SILENT:
+            why.append(f"sin actividad hace {age(now - s.last)}")
+        return why
+
     def auto_focus(self, sessions):
         if not sessions:
             return None
         rank = {"waiting": 3, "busy": 2, "idle": 1, "ended": 0}
-        return max(sessions, key=lambda s: (rank[self.state(s)], s.last))
+        now = time.time()
+        return max(sessions, key=lambda s: (rank[self.state(s)], bool(self.stuck(s, now)), s.last))
 
 
 # ── lienzo para el diagrama ──────────────────────────────────────────────
@@ -994,6 +1058,9 @@ def diagram(store, s, w, compact, now, sel=None, show_all=False):
     plain = [p for p in s.pending.values()]
     if state == "waiting":
         cv.put(lx + 2, 3, trunc(f"◆ necesita {store.waiting_for(s)}", inner), f"bold {breath(WAIT, now)}")
+    elif store.stuck(s, now):
+        cv.put(lx + 2, 3, trunc("⚠ posible atasco: " + " · ".join(store.stuck(s, now)), inner),
+               f"bold {breath(ERR, now)}")
     elif plain and state != "ended":
         name, lab, t0 = max(plain, key=lambda p: p[2])
         more = f" (+{len(plain) - 1})" if len(plain) > 1 else ""
@@ -1119,6 +1186,8 @@ def agent_icon(v, phase, i=0):
 
 def agent_now(v):
     """Qué hace el subagente ahora mismo, o cómo terminó."""
+    if v["running"] and v["quiet"] > STUCK_TOOL:
+        return (f"⚠ sin actividad hace {age(v['quiet'])}", ERR)
     if v["running"]:
         return (f"▶ {v['tool'][0]}: {v['tool'][1]}", TOOL) if v["tool"] else ("pensando…", DIM)
     if v["end"] and v["status"] != "completed":
@@ -1162,8 +1231,11 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     who = short_model(s.model) + (f" · effort {s.effort}" if s.effort else "") + f" · {store.label(s)}"
     cv.put(x, 0, trunc(who, max(0, w - x - len(right) - 2)), "bold")
     cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
+    why = store.stuck(s, now)
     if state == "waiting":
         cv.put(0, 1, trunc(f"◆ necesita {store.waiting_for(s)}", w), f"bold {breath(WAIT, now)}")
+    elif why:
+        cv.put(0, 1, trunc("⚠ posible atasco: " + " · ".join(why), w), f"bold {breath(ERR, now)}")
     elif s.pending and state != "ended":
         name, lab, _ = max(s.pending.values(), key=lambda p: p[2])
         more = f" (+{len(s.pending) - 1})" if len(s.pending) > 1 else ""
@@ -1188,7 +1260,8 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
         cv.put(x + i, 3, ch, color if peak else LINE)
     rate = sum(1 for t in s.beats if 0 <= now - t < 60)
     last = max(s.beats) if s.beats else 0
-    cv.put(x + bw + 2, 3, trunc(f"{rate} tools/min" + (f" · última hace {age(now - last)}" if last else ""),
+    cv.put(x + bw + 2, 3, trunc(f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min"
+                                + (f" · última hace {age(now - last)}" if last else ""),
                                 max(0, w - x - bw - 2)), DIM)
     return 5
 
@@ -1386,6 +1459,10 @@ def header(store, sessions, account, now):
     if waiting:
         title.append(sep, style=DIM)
         title.append(f"◆ {waiting} ESPERA{'N' if waiting != 1 else ''} TU RESPUESTA", style=f"bold {breath(WAIT, now)}")
+    jammed = sum(1 for s in sessions if store.stuck(s, now))
+    if jammed:
+        title.append(sep, style=DIM)
+        title.append(f"⚠ {jammed} ATASCADA{'S' if jammed != 1 else ''}", style=f"bold {breath(ERR, now)}")
     title.append(sep, style=DIM)
     title.append(time.strftime("%H:%M:%S", time.localtime(now)), style=DIM)
     legend = Text(justify="center")
@@ -1404,8 +1481,11 @@ def side_panel(store, sessions, focus, rows, now, active=False):
     for s in sessions[first: first + fit]:
         state = store.state(s)
         dot, color = STATES[state][0], state_color(state)
+        why = store.stuck(s, now)
         if state == "waiting":
             color = f"bold {breath(WAIT, now)}"
+        elif why:
+            dot, color = "⚠", f"bold {breath(ERR, now)}"
         mark = "▸" if s is focus else " "
         when = age(now - s.last) if s.last else "—"
         name = trunc(store.label(s), width - 6 - len(when))
@@ -1414,9 +1494,11 @@ def side_panel(store, sessions, focus, rows, now, active=False):
         body.append(name, style="bold reverse" if s is focus else (FG if state != "ended" else DIM))
         body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=DIM)
         pw = 9
-        text = "necesita " + store.waiting_for(s) if state == "waiting" else s.title or s.cwd.replace(HOME, "~") or "—"
+        text = ("necesita " + store.waiting_for(s) if state == "waiting" else why[0] if why
+                else s.title or s.cwd.replace(HOME, "~") or "—")
         text = trunc(text, width - 5 - pw)
-        body.append("    " + text + " " * (width - 4 - pw - len(text)), style=WAIT if state == "waiting" else DIM)
+        body.append("    " + text + " " * (width - 4 - pw - len(text)),
+                    style=WAIT if state == "waiting" else ERR if why else DIM)
         chars, hot = pulse(s.beats, now, pw)
         for ch, peak in zip(chars, hot):
             body.append(ch, style=state_color(state) if peak else LINE)
@@ -1440,6 +1522,8 @@ def session_card(store, s, now):
 
     if state == "waiting":
         row("necesita", store.waiting_for(s))
+    row("atasco", " · ".join(store.stuck(s, now)))
+    row("ritmo", f"{ktok(round(s.token_rate(now)))} tok/min · hoy {ktok(s.tokens_today(now))}")
     row("cuenta", s.account)
     row("carpeta", (s.cwd or "").replace(HOME, "~"))
     row("rama", s.branch)
@@ -1633,7 +1717,12 @@ def stats_panel(store, s, now):
         t.append(f"{'contexto':<11}", style=DIM)
         t.append("█" * fill, style=TOOL if pct < 60 else LEAD if pct < 85 else ERR)
         t.append("░" * (12 - fill), style=LINE)
-        t.append(f" {pct}% · {ktok(s.ctx)} de {ktok(s.window())}\n", style=FG)
+        left = s.turns_left()
+        t.append(f" {pct}% · {ktok(s.ctx)} de {ktok(s.window())}"
+                 + (f" · ~{left} turnos para llenarse" if left is not None else "") + "\n", style=FG)
+    why = store.stuck(s, now)
+    if why:
+        row("atasco", "⚠ " + " · ".join(why), ERR)
     usage = []
     if s.cache_pct is not None:
         usage.append(f"caché {s.cache_pct}%")
@@ -1641,6 +1730,9 @@ def stats_panel(store, s, now):
     if s.cost is not None:
         usage.append(f"${s.cost:.2f}")
     row("tokens", " · ".join(usage))
+    today = store.daily[(s.account, time.localtime(now)[:3])]
+    row("ritmo", f"{ktok(round(s.token_rate(now)))} tok/min · hoy {ktok(s.tokens_today(now))} esta sesión · "
+                 f"{ktok(today)} la cuenta {s.account}")
     turns = str(s.turns)
     if s.turns:
         turns += f" · último {age(s.turn_last / 1000)} · total {age(s.turn_total / 1000)}"
@@ -1930,6 +2022,10 @@ def watch(store, sessions, seen, now):
     out = []
     for s in sessions:
         state = store.state(s)
+        why = store.stuck(s, now)
+        if why and not seen.get(("stuck", s.sid)):
+            out.append((s.sid, f"{store.label(s)} parece atascada: {why[0]}"))
+        seen[("stuck", s.sid)] = bool(why)
         was, since = seen.get(s.sid, (None, now))
         if was == state:
             continue
