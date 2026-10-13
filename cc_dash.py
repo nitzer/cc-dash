@@ -10,6 +10,7 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
         o muestra la lista de tareas de la sesión (hechas, en curso y pendientes)
+        n muestra el registro de novedades · x cierra todos los toasts
         / busca en el log (Enter aplica, Esc borra) · y copia lo que se está viendo
         E activa o apaga los efectos (arranque, glitch en avisos, lluvia en reposo)
         Enter salta al panel de tmux de la sesión enfocada
@@ -50,6 +51,7 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.segment import Segment
 from rich.table import Table
 from rich.text import Text
 
@@ -60,7 +62,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -132,6 +134,13 @@ STUCK_ERRORS = 3     # resultados con error seguidos
 STUCK_REPEAT = 4     # veces seguidas la misma llamada, con los mismos parámetros
 STUCK_TOOL = 300     # segundos que una herramienta puede tardar en volver
 STUCK_SILENT = 180   # segundos trabajando sin escribir nada en el transcript
+TOAST_LIFE = 8       # segundos que un toast sigue en pantalla
+TOAST_MAX = 4        # toasts visibles a la vez
+FRESH = 4            # segundos que dura el efecto de una tarea recién terminada
+# tipo de novedad -> (icono, título, papel de color, ruidosa: pitido + mensaje de tmux + log)
+NEWS = {"wait": ("◆", "te espera", "WAIT", True), "stuck": ("⚠", "posible atasco", "ERR", True),
+        "fail": ("✗", "falló un subagente", "ERR", True), "done": ("■", "turno terminado", "TOOL", True),
+        "task": ("✓", "tarea terminada", "TOOL", False), "agent": ("✓", "subagente terminado", "SWARM", False)}
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -212,6 +221,10 @@ def tool_label(name, inp):
         return ""
     if name == "Bash":
         return inp.get("description") or inp.get("command") or ""
+    if name == "TaskCreate":
+        return inp.get("subject") or ""
+    if name == "TaskUpdate":
+        return f"#{inp.get('taskId', '?')}" + (f" → {inp['status']}" if inp.get("status") else "")
     if name in ("Read", "Edit", "Write", "NotebookEdit"):
         return os.path.basename(inp.get("file_path") or inp.get("notebook_path") or "")
     for key in ("description", "pattern", "query", "url", "skill", "prompt"):
@@ -510,7 +523,8 @@ class Store:
         self.git_cache = {}      # carpeta -> (cuándo se consultó, datos | None)
         self.daily = Counter()   # (cuenta, (año, mes, día)) -> tokens de salida
         self.ready = False  # tras la carga inicial: desde ahí los fallos generan aviso
-        self.alerts = []    # (sid, texto) pendientes de avisar
+        self.alerts = []    # (sid, tipo, texto) pendientes de avisar
+        self.news = deque(maxlen=300)   # registro de novedades: {"ts", "sid", "kind", "text"}
         self.aid_of = {}    # tool_use_id del lanzamiento -> agentId (de *.meta.json)
         self.agent_type = {}
         self.meta_seen = set()
@@ -636,14 +650,33 @@ class Store:
         elif path and name == "Read":
             s.reads.add(path)
 
+    def task_done(self, s, task):
+        """Una tarea acaba de pasar a terminada: marca el momento (para el efecto) y avisa."""
+        if not self.ready:
+            return
+        task["flash"] = time.time()
+        tasks = list(s.todos.values())
+        done = sum(1 for t in tasks if t["status"] == "completed")
+        text = f"{task['subject']} · {done}/{len(tasks)}"
+        if done == len(tasks):
+            text += " · lista completa"
+        self.alerts.append((s.sid, "task", text))
+
     def track_tasks(self, s, tid, name, inp):
         """Sigue la lista de tareas: TodoWrite la reemplaza entera; TaskCreate/TaskUpdate la editan."""
         if not isinstance(inp, dict):
             return
         if name == "TodoWrite" and isinstance(inp.get("todos"), list):
+            before = {t["subject"]: t for t in s.todos.values()}
             s.todos = {str(i): {"subject": t.get("content") or "", "active": t.get("activeForm") or "",
                                 "status": t.get("status") or "pending"}
                        for i, t in enumerate(inp["todos"]) if isinstance(t, dict)}
+            for task in s.todos.values():
+                old = before.get(task["subject"])
+                if old and old.get("flash"):
+                    task["flash"] = old["flash"]
+                if task["status"] == "completed" and old is not None and old["status"] != "completed":
+                    self.task_done(s, task)
         elif name == "TaskCreate":
             s.task_new[tid] = {"subject": inp.get("subject") or "", "active": inp.get("activeForm") or "",
                                "status": "pending"}
@@ -653,9 +686,12 @@ class Store:
                 s.todos.pop(key, None)
                 return
             task = s.todos.setdefault(key, {"subject": f"tarea {key}", "active": "", "status": "pending"})
+            was = task["status"]
             for src, dst in (("status", "status"), ("subject", "subject"), ("activeForm", "active")):
                 if inp.get(src):
                     task[dst] = inp[src]
+            if task["status"] == "completed" and was != "completed":
+                self.task_done(s, task)
 
     def add_usage(self, s, o, msg, side=None):
         usage = msg.get("usage") or {}
@@ -721,7 +757,7 @@ class Store:
         elif kind == "queue-operation":
             text = o.get("content") if isinstance(o.get("content"), str) else ""
             if o.get("operation") == "enqueue" and "<task-notification>" in text[:60]:
-                self.task_done(s, text, ts)
+                self.agent_notice(s, text, ts)
         elif kind == "system" and o.get("subtype") == "turn_duration" and not side:
             s.turns += 1
             s.turn_last = o.get("durationMs") or 0
@@ -858,7 +894,7 @@ class Store:
                 self.event(ts, s.sid, DIM, "↳ " + (self.agent_type.get(aid) or "agente"),
                            f"{info['tool'][0]}: {info['tool'][1]}", aid, item)
 
-    def task_done(self, s, text, ts):
+    def agent_notice(self, s, text, ts):
         task = re.search(r"<task-id>([^<]+)</task-id>", text)
         status = re.search(r"<status>([^<]+)</status>", text)
         if not task:
@@ -871,8 +907,9 @@ class Store:
         a["end"] = ts or time.time()
         a["status"] = status
         ok = status == "completed"
-        if self.ready and not ok:
-            self.alerts.append((s.sid, f"falló el subagente «{a['desc']}» de {self.label(s)}"))
+        if self.ready:
+            self.alerts.append((s.sid, "agent" if ok else "fail",
+                                f"{a['type']}: {a['desc']} ({clock(a['end'] - a['start'])})"))
         self.event(ts, s.sid, SWARM if ok else ERR, "Agent",
                    f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})", a["id"],
                    {"k": "agent", "id": a["id"]})
@@ -1341,8 +1378,14 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     if tasks:
         done, total, doing = tasks
         fill = round(done / total * 12)
-        x = segs(cv, 0, 4, [("tareas   ", DIM), ("▰" * fill, TOOL), ("▱" * (12 - fill), LINE), (f" {done}/{total}", FG)])
-        cv.put(x + 3, 4, trunc(f"▶ {doing}" if doing else "", max(0, w - x - 3)), TOOL)
+        just = next((t for t in s.todos.values() if now - t.get("flash", 0) < FRESH), None)
+        glow = f"bold {breath(TOOL, now * 3)}"
+        x = segs(cv, 0, 4, [("tareas   ", DIM), ("▰" * fill, glow if just else TOOL), ("▱" * (12 - fill), LINE),
+                            (f" {done}/{total}", FG)])
+        if just:   # una tarea acaba de terminar: se anuncia aquí unos segundos
+            cv.put(x + 3, 4, trunc(f"✦ terminada: {just['subject']}", max(0, w - x - 3)), glow)
+        else:
+            cv.put(x + 3, 4, trunc(f"▶ {doing}" if doing else "", max(0, w - x - 3)), TOOL)
         return 6
     return 5
 
@@ -1902,7 +1945,7 @@ def stats_panel(store, s, now):
     return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
 
 
-def tasks_panel(store, s, ui, rows, width):
+def tasks_panel(store, s, ui, rows, width, now):
     """La lista de tareas de la sesión: hechas, en curso y pendientes."""
     frame = dict(title_align="left", subtitle_align="right", box=PANEL_BOX, border_style=TOOL)
     tasks = list(s.todos.values()) if s else []
@@ -1930,8 +1973,18 @@ def tasks_panel(store, s, ui, rows, width):
     body = Text(no_wrap=True, overflow="ellipsis")
     chunk = tasks[top: top + body_rows]
     for n, task in enumerate(chunk):
+        fresh = now - task.get("flash", 0)
+        if task["status"] == "completed" and fresh < FRESH:
+            # recién terminada: un barrido la recorre y luego queda brillando unos segundos
+            text = trunc(task["subject"], max(10, width - 8))
+            swept = len(text) if fresh >= 0.7 else int(fresh / 0.7 * len(text))
+            glow = f"bold {breath(TOOL, now * 3)}"
+            body.append(" ✦ " if int(now * 4) % 2 else " ✓ ", style=glow)
+            body.append(text[:swept], style=f"bold {CARD_BG} on {TOOL}" if fresh < 0.7 else glow)
+            body.append(text[swept:] + ("\n" if n < len(chunk) - 1 else ""), style=FG)
+            continue
         if task["status"] == "completed":
-            mark, style, text = "✓", DIM, task["subject"]
+            mark, style, text = "✓", f"{DIM} strike", task["subject"]
         elif task["status"] == "in_progress":
             mark, style, text = "▶", f"bold {LEAD}", task["active"] or task["subject"]
         else:
@@ -1950,7 +2003,9 @@ def detail_panel(store, s, ui, rows, width, now):
     i = next((n for n, v in enumerate(agents) if v["id"] == ui["sel"]), None)
     if i is None:
         ui["sel"] = None
-        return tasks_panel(store, s, ui, rows, width) if ui["tasks"] else stats_panel(store, s, now)
+        if ui["news"]:
+            return news_panel(store, ui, rows, width, now)
+        return tasks_panel(store, s, ui, rows, width, now) if ui["tasks"] else stats_panel(store, s, now)
     v = agents[i]
     prompt = ui["tab"] == "prompt"
     text = v["prompt"] if prompt else v["response"]
@@ -2076,7 +2131,7 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "Enter ir · s log · o tareas · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "Enter ir · s log · o tareas · n novedades · x cierra toasts · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
@@ -2084,6 +2139,65 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
 def query(ui):
     """Texto por el que se filtra el log: lo que se está escribiendo o lo ya aplicado."""
     return ui["typing"].decode("utf-8", "ignore") if ui["typing"] is not None else ui["find"]
+
+
+class Overlay:
+    """Dibuja los toasts apilados en la esquina superior derecha, encima del resto."""
+
+    def __init__(self, base, toasts, width, top=3):
+        self.base, self.toasts, self.width, self.top = base, toasts, width, top
+
+    def __rich_console__(self, console, options):
+        lines = console.render_lines(self.base, options, pad=True)
+        x = max(0, options.max_width - self.width - 1)
+        y = self.top
+        for toast in self.toasts:
+            for row in console.render_lines(toast, options.update(width=self.width, height=None), pad=True):
+                if y >= len(lines) - 1:
+                    break
+                parts = list(Segment.divide(lines[y], [x, x + self.width, options.max_width]))
+                lines[y] = parts[0] + row + (parts[2] if len(parts) > 2 else [])
+                y += 1
+        for line in lines:
+            yield from line
+            yield Segment.line()
+
+
+def toast_panel(toast, width, now):
+    icon, title, role, _ = NEWS[toast["kind"]]
+    color = THEME[role]
+    left = max(0.0, 1 - (now - toast["born"]) / TOAST_LIFE)
+    body = Text(no_wrap=True, overflow="ellipsis")
+    if toast["who"]:
+        body.append(trunc(toast["who"], width - 4) + "\n", style=DIM)
+    wrapped = textwrap.wrap(toast["text"], width - 4)[:2] or [""]
+    body.append("\n".join(wrapped) + "\n", style=f"bold {FG}")
+    bar = round(left * (width - 4))
+    body.append("▔" * bar, style=color)   # se va acortando: lo que le queda en pantalla
+    return Panel(body, title=f"{icon} {title}", title_align="left", box=box.HEAVY,
+                 border_style=f"bold {color}", style=f"on {CARD_BG}", width=width)
+
+
+def news_panel(store, ui, rows, width, now):
+    """Registro de novedades: todo lo que salió como toast, con su hora."""
+    body = Text(no_wrap=True, overflow="ellipsis")
+    items = list(store.news)
+    ui["rows"] = rows
+    back = min(ui["scroll"], max(0, len(items) - rows))   # cuántas entradas hacia atrás
+    ui["scroll"] = back
+    last = len(items) - back
+    chunk = items[max(0, last - rows): last]
+    for n, item in enumerate(chunk):
+        icon, title, role, _ = NEWS[item["kind"]]
+        body.append(time.strftime("%H:%M:%S", time.localtime(item["ts"])) + " ", style=DIM)
+        body.append(f"{icon} ", style=f"bold {THEME[role]}")
+        text = f"{item['who']} · {item['text']}" if item["who"] else item["text"]
+        body.append(trunc(text, max(10, width - 16)) + ("\n" if n < len(chunk) - 1 else ""), style=FG)
+    if not items:
+        body.append("todavía no hay novedades", style=DIM)
+    pos = f"{max(0, last - rows) + 1}–{last} de {len(items)}" if len(items) > rows else None
+    return Panel(body, title=label("novedades", "NEWS"), title_align="left", subtitle=pos,
+                 subtitle_align="right", box=PANEL_BOX, border_style=WAIT)
 
 
 def mode_hint(ui):
@@ -2104,6 +2218,8 @@ def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
+            "toasts": [],                 # novedades en pantalla: {"born", "kind", "who", "text"}
+            "news": False,                # registro de novedades en lugar de la actividad (tecla n)
             "tasks": False,               # lista de tareas en lugar de la actividad (tecla o)
             "tasks_of": None, "tasks_top": 0,   # sesión mostrada y primera fila visible
             "find": "", "typing": None,   # filtro del log y texto que se está escribiendo (bytes)
@@ -2146,7 +2262,7 @@ def render(console, store, focus_sid, account, now, ui=None):
     elif lg is not None:
         bottom.update(detail if lg["pane"] == "out" else log)
     else:
-        bottom.update(detail if ui["sel"] or ui["info"] or ui["tasks"] else log)
+        bottom.update(detail if ui["sel"] or ui["info"] or ui["tasks"] or ui["news"] else log)
 
     root = Layout()
     root.split_column(
@@ -2185,6 +2301,10 @@ def render(console, store, focus_sid, account, now, ui=None):
         root["mid"].split_row(side, Layout(diag))
     else:
         root["mid"].update(diag)
+    ui["toasts"][:] = [t for t in ui["toasts"] if now - t["born"] < TOAST_LIFE]
+    if ui["toasts"]:
+        tw = max(30, min(46, width // 2))
+        root = Overlay(root, [toast_panel(t, tw, now) for t in ui["toasts"]], tw)
     return root, sessions, focus
 
 
@@ -2208,22 +2328,22 @@ def read_keys(fd, timeout):
 
 
 def watch(store, sessions, seen, now):
-    """Avisos (sid, texto) por cambios de estado desde la pasada anterior."""
+    """Novedades (sid, tipo, texto) por cambios de estado desde la pasada anterior."""
     out = []
     for s in sessions:
         state = store.state(s)
         why = store.stuck(s, now)
         if why and not seen.get(("stuck", s.sid)):
-            out.append((s.sid, f"{store.label(s)} parece atascada: {why[0]}"))
+            out.append((s.sid, "stuck", why[0]))
         seen[("stuck", s.sid)] = bool(why)
         was, since = seen.get(s.sid, (None, now))
         if was == state:
             continue
         if was is not None:
             if state == "waiting":
-                out.append((s.sid, f"{store.label(s)} necesita {store.waiting_for(s)}"))
+                out.append((s.sid, "wait", f"necesita {store.waiting_for(s)}"))
             elif state == "idle" and was in ("busy", "waiting") and now - since >= 60:
-                out.append((s.sid, f"{store.label(s)} terminó tras {age(now - since)}"))
+                out.append((s.sid, "done", f"terminó tras {age(now - since)}"))
         # el reloj corre desde que empezó a trabajar; pasar por "waiting" no lo reinicia
         if not (state in ("busy", "waiting") and was in ("busy", "waiting")):
             since = now
@@ -2233,18 +2353,26 @@ def watch(store, sessions, seen, now):
     return out
 
 
-def notify(store, ui, sid, text, now):
-    ui["flash"] = (text, now + 6)
+def notify(store, ui, sid, kind, text, now):
+    """Una novedad: toast y registro siempre; las ruidosas además suenan y quedan en el log."""
+    s = store.sessions.get(sid)
+    who = store.label(s) if s else ""
+    store.news.append({"ts": now, "sid": sid, "kind": kind, "who": who, "text": text})
+    ui["toasts"].append({"born": now, "kind": kind, "who": who, "text": text})
+    del ui["toasts"][:-TOAST_MAX]
+    if not NEWS[kind][3]:
+        return
     if ui["effects"]:
         ui["glitch"] = now + 0.6
-    store.event(now, sid, "WAIT", "aviso", text)
+    line = f"{who} {text}".strip()
+    store.event(now, sid, NEWS[kind][2], "aviso", f"{NEWS[kind][1]}: {text}")
     if not ui["alerts"]:
         return
     sys.stdout.write("\a")
     sys.stdout.flush()
     if os.environ.get("TMUX"):
         try:
-            subprocess.run(["tmux", "display-message", "-d", "4000", f"cc-dash: {text}"],
+            subprocess.run(["tmux", "display-message", "-d", "4000", f"cc-dash: {NEWS[kind][1]} · {line}"],
                            capture_output=True, timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -2363,8 +2491,8 @@ def run(accounts, once, cfg):
                 now = time.time()
                 store.poll(now)
                 root, sessions, focus = render(console, store, focus_sid, account, now, ui)
-                for sid, text in watch(store, sessions, seen, now):
-                    notify(store, ui, sid, text, now)
+                for sid, kind, text in watch(store, sessions, seen, now):
+                    notify(store, ui, sid, kind, text, now)
                 if focus is not None:
                     store.git_info(focus, now, refresh=True)
                 if not queue:
@@ -2400,10 +2528,15 @@ def run(accounts, once, cfg):
                     ui["flash"] = (f"copiado ({len(text)} caracteres)" if text
                                    else "nada que copiar: abre una entrada del log (s) o un subagente", now + 3)
                     continue
-                if keys == b"o":
-                    ui["tasks"], ui["scroll"], ui["tasks_of"] = not ui["tasks"], 0, None
-                    if ui["tasks"]:
-                        ui["sel"] = ui["log"] = None   # el panel de la derecha pasa a ser el de tareas
+                if keys == b"x":
+                    ui["toasts"].clear()
+                    continue
+                if keys in (b"o", b"n"):
+                    which, other = ("tasks", "news") if keys == b"o" else ("news", "tasks")
+                    ui[which], ui[other] = not ui[which], False
+                    ui["scroll"], ui["tasks_of"] = 0, None
+                    if ui[which]:
+                        ui["sel"] = ui["log"] = None   # el panel de la derecha pasa a ser este
                     continue
                 if keys == b"E":
                     ui["effects"] = cfg["effects"] = not ui["effects"]
@@ -2542,6 +2675,8 @@ def run(accounts, once, cfg):
                     if ui["tasks"] and ui["scroll"] < 0:
                         ui["scroll"] = ui["tasks_top"]   # deja de seguir la tarea en curso
                     step = page if keys in (b" ", b"\x1b[6~") else -page
+                    if ui["news"] and not ui["sel"]:
+                        step = -step   # el registro se cuenta desde el final: RePág va hacia atrás
                     ui["scroll"] = max(0, ui["scroll"] + step)
                 elif keys == b"a":
                     focus_sid, ui["sel"] = None, None

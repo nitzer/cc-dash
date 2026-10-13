@@ -144,6 +144,25 @@ subagentes quedan fuera porque sus transcripts no los registran bien.
 - lluvia de caracteres en el panel de agentes cuando la sesión enfocada lleva
   más de un minuto sin trabajar y no tiene subagentes a la vista.
 
+## Novedades: toasts y registro
+
+Cada novedad aparece como un toast en la esquina superior derecha, con una
+barra que se acorta hasta que desaparece a los 8 segundos (caben 4 a la vez):
+
+- una sesión pasa a esperarte, parece atascada o termina un turno largo,
+- un subagente termina o falla,
+- una tarea de la lista se completa.
+
+`x` cierra todos los toasts. `n` cambia el panel de actividad por el registro
+de novedades, con la hora de cada una (`RePág` va hacia atrás). El pitido y el
+mensaje de tmux quedan solo para las importantes (espera, atasco, fallo y
+turno terminado); `m` los silencia sin quitar los toasts.
+
+Cuando una tarea se completa, además del toast: en la lista (`o`) un barrido
+de color recorre la fila y queda brillando unos segundos antes de pasar a
+tachada, y en la cabecera del lead la barra de progreso brilla y anuncia
+`✦ terminada: …`.
+
 ## Sesiones que esperan tu respuesta
 
 Cuando una sesión se detiene a la espera de un permiso, una pregunta, la
