@@ -11,6 +11,10 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         t muestra/oculta los subagentes ya terminados
         f limita el log a la sesión enfocada (con un subagente seleccionado,
           el log muestra solo lo de ese subagente)
+        s muestra la conversación de la sesión enfocada en lugar del diagrama:
+          j/k mueve el cursor entre sesiones, l entra a la conversación
+          (j/k la desplazan), h vuelve a la lista, AvPág/RePág desplazan
+          siempre, G/Fin vuelve a seguir en vivo, s cierra
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
@@ -45,7 +49,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -57,6 +61,7 @@ ADVISOR = "#b48efc"
 ERR = "#ef6b73"
 DIM = "#5c6680"
 LINE = "#3b4560"
+CARD_BG = "#1c2740"   # fondo de la tarjeta de detalles de la sesión
 FG = "#c9d1e4"
 
 AGENT_TOOLS = ("Agent", "Task")
@@ -346,6 +351,16 @@ class Session:
         self.agents = []    # lanzamientos vistos en el transcript principal
         self.side = {}      # agentId -> actividad leída del transcript del subagente
         self.requests = {}  # requestId -> tokens de salida ya contados
+        self.items = []     # conversación: prompts, texto del asistente y herramientas
+        self.open_items = {}  # tool_use_id -> item a la espera de su resultado
+        self.rev = 0        # cambia con cada novedad en la conversación
+
+    def add_item(self, item):
+        self.items.append(item)
+        self.rev += 1
+        if len(self.items) > 3000:
+            del self.items[:500]
+        return item
 
     def window(self):
         """Ventana de contexto. El transcript no la guarda: 1M si el modelo lo indica
@@ -554,9 +569,15 @@ class Store:
                     continue
                 name = b.get("name") or ""
                 inp = b.get("input") or {}
+                if b.get("type") == "text" and not side and (b.get("text") or "").strip():
+                    s.add_item({"k": "text", "ts": ts, "text": b["text"].strip()})
                 if b.get("type") == "tool_use":
                     self.count_tool(s, name, inp)
                     label = tool_label(name, inp)
+                    if not side:
+                        shown = f"{inp.get('subagent_type') or 'general'}: {label}" if name in AGENT_TOOLS else label
+                        s.open_items[b.get("id")] = s.add_item(
+                            {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None, "err": False})
                     if name in AGENT_TOOLS and not side:
                         s.agents.append({
                             "id": b.get("id"), "aid": None, "start": ts, "end": None,
@@ -580,6 +601,7 @@ class Store:
             if isinstance(content, str):
                 if not side and not o.get("isMeta") and not content.lstrip().startswith("<"):
                     s.pending.clear()
+                    s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
                     self.event(ts, sid, LEAD, "prompt", "› " + content)
                 return
             result = o.get("toolUseResult") if isinstance(o.get("toolUseResult"), dict) else {}
@@ -587,6 +609,11 @@ class Store:
                 if not isinstance(b, dict) or b.get("type") != "tool_result":
                     continue
                 tid = b.get("tool_use_id")
+                item = s.open_items.pop(tid, None)
+                if item is not None:
+                    out = [ln for ln in block_text(b.get("content")).splitlines() if ln.strip()]
+                    item["res"], item["more"], item["err"] = out[:4], max(0, len(out) - 4), bool(b.get("is_error"))
+                    s.rev += 1
                 if b.get("is_error"):
                     s.errors += 1
                 done = s.pending.pop(tid, None)
@@ -946,10 +973,13 @@ def header(store, sessions, account, now):
     return Group(title, Rule(style=LINE), legend)
 
 
-def side_panel(store, sessions, focus, rows, now):
+def side_panel(store, sessions, focus, rows, now, active=False):
     body = Text()
     width = 30
-    for s in sessions[: max(1, rows // 2)]:
+    fit = max(1, rows // 2)
+    at = sessions.index(focus) if focus in sessions else 0
+    first = max(0, at - fit + 1)   # la lista se desplaza para no perder el cursor
+    for s in sessions[first: first + fit]:
         state = store.state(s)
         dot, color = {"busy": ("●", LEAD), "idle": ("○", TOOL), "ended": ("·", DIM)}[state]
         mark = "▸" if s is focus else " "
@@ -957,10 +987,62 @@ def side_panel(store, sessions, focus, rows, now):
         name = trunc(store.label(s), width - 6 - len(when))
         body.append(f"{mark} ", style=f"bold {LEAD}")
         body.append(f"{dot} ", style=color)
-        body.append(name, style="bold" if s is focus else (FG if state != "ended" else DIM))
+        body.append(name, style="bold reverse" if s is focus else (FG if state != "ended" else DIM))
         body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=DIM)
         body.append("    " + trunc(s.title or s.cwd.replace(HOME, "~") or "—", width - 4) + "\n", style=DIM)
-    return Panel(body, title="sesiones", title_align="left", box=box.SQUARE, border_style=LINE)
+    return Panel(body, title="sesiones", title_align="left", box=box.SQUARE,
+                 border_style=LEAD if active else LINE)
+
+
+def session_card(store, s, now):
+    """Tarjeta de color con todos los datos de la sesión bajo el cursor. Devuelve (panel, alto)."""
+    state = store.state(s)
+    live = store.live.get(s.sid) or {}
+    label, color = {"busy": ("● trabajando", LEAD), "idle": ("○ esperando", TOOL), "ended": ("· cerrada", DIM)}[state]
+    width = 30
+    rows = []
+
+    def row(key, value):
+        if value:
+            rows.append((key, trunc(value, width - 10)))
+
+    row("cuenta", s.account)
+    row("carpeta", (s.cwd or "").replace(HOME, "~"))
+    row("rama", s.branch)
+    row("modelo", short_model(s.model) if s.model else "")
+    row("effort", " · ".join(x for x in (s.effort, s.perm and f"permisos {s.perm}") if x))
+    row("advisor", short_model(s.advisor) if s.advisor else "")
+    if s.ctx:
+        row("contexto", f"{min(100, round(100 * s.ctx / s.window()))}% · {ktok(s.ctx)} de {ktok(s.window())}")
+    row("tokens", f"salida {ktok(s.out_tokens)}" + (f" · caché {s.cache_pct}%" if s.cache_pct is not None else ""))
+    row("coste", f"${s.cost:.2f}" if s.cost is not None else "")
+    row("turnos", f"{s.turns} · total {age(s.turn_total / 1000)}" if s.turns else "0")
+    row("tools", f"{s.tools}" + (f" · {s.errors} con error" if s.errors else ""))
+    agents = store.agents(s)
+    if agents:
+        row("subag.", f"{len(agents)} · {sum(1 for v in agents if v['running'])} en marcha")
+    row("skills", " · ".join(s.skills))
+    row("archivos", f"{len(s.edits)} editados · {len(s.reads - set(s.edits))} leídos" if s.edits or s.reads else "")
+    if live.get("startedAt"):
+        row("inicio", time.strftime("%d/%m %H:%M", time.localtime(live["startedAt"] / 1000))
+            + f" · hace {age(now - live['startedAt'] / 1000)}")
+    row("actividad", f"hace {age(now - s.last)}" if s.last else "")
+    row("proceso", " · ".join(x for x in (live.get("pid") and f"pid {live['pid']}",
+                                          live.get("version") and f"v{live['version']}") if x))
+    row("tmux", live.get("tmux") or "")
+    row("id", s.sid[:8])
+
+    t = Text(no_wrap=True, overflow="ellipsis")
+    name = trunc(store.name(s), width - len(label) - 1)
+    t.append(name, style="bold")
+    t.append(" " * max(1, width - len(name) - len(label)) + label + "\n", style=f"bold {color}")
+    t.append(trunc(s.title or "sin título", width) + "\n", style=FG)
+    for n, (key, value) in enumerate(rows):
+        t.append(f"{key:<10}", style=DIM)
+        t.append(value + ("\n" if n < len(rows) - 1 else ""), style=FG)
+    panel = Panel(t, title="detalles", title_align="left", box=box.HEAVY, border_style=LEAD,
+                  style=f"on {CARD_BG}")
+    return panel, len(rows) + 4
 
 
 def log_panel(store, focus, account, rows, width, now, agent=None, only_focus=False):
@@ -1094,7 +1176,74 @@ def detail_panel(store, s, ui, rows, width, now):
                  subtitle_align="right", box=box.SQUARE, border_style=SWARM)
 
 
-def footer(store, s, auto, account, now, sel=False):
+_lines_cache = {}
+
+
+def transcript_lines(s, width):
+    """La conversación de la sesión como líneas (texto, estilo) ya ajustadas al ancho."""
+    key = (s.sid, width, s.rev)
+    if _lines_cache.get("key") == key:
+        return _lines_cache["lines"]
+    out = []
+
+    def add(text, style, first, rest):
+        lead = first
+        for raw in text.splitlines() or [""]:
+            for n, part in enumerate(textwrap.wrap(raw, max(20, width - len(first)), replace_whitespace=False,
+                                                   drop_whitespace=False) or [""]):
+                out.append((lead + (part.lstrip() if n else part), style))
+                lead = rest
+
+    for it in s.items:
+        if it["k"] == "prompt":
+            stamp = time.strftime("%H:%M:%S", time.localtime(it["ts"])) if it["ts"] else ""
+            out.append(("", ""))
+            out.append((f"── {stamp} " + "─" * max(0, width - len(stamp) - 4), LINE))
+            add(it["text"], f"bold {LEAD}", "› ", "  ")
+            out.append(("", ""))
+        elif it["k"] == "text":
+            add(it["text"], FG, "  ", "  ")
+            out.append(("", ""))
+        else:
+            out.append(("  " + trunc(f"▶ {it['name']}  {it['label']}", width - 2), TOOL))
+            if it["res"] is None:
+                continue
+            style = ERR if it["err"] else DIM
+            for n, line in enumerate(it["res"]):
+                out.append((("    ⎿ " if n == 0 else "      ") + trunc(line, width - 6), style))
+            if it["more"]:
+                out.append((f"      … +{it['more']} líneas", DIM))
+    _lines_cache.update(key=key, lines=out)
+    return out
+
+
+def session_panel(store, s, view, rows, width, now):
+    """Conversación de la sesión, en el lugar del diagrama. view["top"] None = seguir en vivo."""
+    if s is None:
+        return Panel(Text("sin sesión", style=DIM), box=box.SQUARE, border_style=LEAD)
+    lines = transcript_lines(s, max(20, width - 4))
+    last = max(0, len(lines) - rows)
+    if view["top"] is not None and view["top"] >= last:
+        view["top"] = None
+    top = last if view["top"] is None else max(0, view["top"])
+    view["rows"], view["last"] = rows, last
+    body = Text(no_wrap=True, overflow="ellipsis")
+    chunk = lines[top: top + rows]
+    for n, (text, style) in enumerate(chunk):
+        body.append(text + ("\n" if n < len(chunk) - 1 else ""), style=style or None)
+    if not lines:
+        body.append("esta sesión todavía no tiene conversación", style=DIM)
+    state = {"busy": "trabajando", "idle": "esperando prompt", "ended": "cerrada"}[store.state(s)]
+    title = f"sesión · {store.label(s)} · {state}" + (f" · {s.title}" if s.title else "")
+    if view["top"] is None:
+        pos = "siguiendo en vivo" if store.state(s) != "ended" else "final"
+    else:
+        pos = f"líneas {top + 1}–{min(len(lines), top + rows)} de {len(lines)} · Fin para seguir en vivo"
+    return Panel(body, title=trunc(title, max(10, width - 6)), title_align="left", subtitle=pos,
+                 subtitle_align="right", box=box.SQUARE, border_style=LEAD if view["pane"] == "out" else LINE)
+
+
+def footer(store, s, auto, account, now, sel=False, hint=None):
     t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         t.append("q salir", style=DIM)
@@ -1114,16 +1263,20 @@ def footer(store, s, auto, account, now, sel=False):
     field("tools", len(s.pending) if state != "ended" else 0, TOOL)
     if store.multi:
         field("cuenta", account or "todas", ADVISOR)
+    if hint:
+        t.append(f"   {hint}", style=DIM)
+        return t
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "s conversación · ←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
 def new_ui():
-    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False}
+    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
+            "session": None}  # con la conversación abierta: {"top", "rows", "last", "pane": "list" | "out"}
 
 
 def render(console, store, focus_sid, account, now, ui=None):
@@ -1155,16 +1308,32 @@ def render(console, store, focus_sid, account, now, ui=None):
         Layout(header(store, sessions, account, now), name="head", size=3),
         Layout(name="mid", size=dh + 2),
         bottom,
-        Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"])), name="foot", size=1),
+        Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"]),
+                      hint=None if ui["session"] is None else
+                      "jk desplaza · h vuelve a sesiones · AvPág/RePág · G en vivo · s cierra · q salir"
+                      if ui["session"]["pane"] == "out" else
+                      "jk sesión · l entra a la conversación · AvPág/RePág · s cierra · q salir"),
+               name="foot", size=1),
     )
-    diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now, ui["sel"], ui["all"]),
-                 box=box.SQUARE, border_style=LINE,
-                 title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left")
+    if ui["session"] is not None:
+        diag = session_panel(store, focus, ui["session"], dh, width - side_w, now)
+    else:
+        diag = None
+    if diag is None:
+        diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now, ui["sel"], ui["all"]),
+                     box=box.SQUARE, border_style=LINE,
+                     title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left")
     if wide:
-        root["mid"].split_row(
-            Layout(side_panel(store, sessions, focus, dh, now), size=side_w),
-            Layout(diag),
-        )
+        side = Layout(size=side_w)
+        active = ui["session"] is not None and ui["session"]["pane"] == "list"
+        card, card_h = session_card(store, focus, now) if ui["session"] is not None and focus else (None, 0)
+        card_h = min(card_h, dh - 4)   # deja sitio para el cursor y una sesión vecina
+        if card is not None:
+            side.split_column(Layout(side_panel(store, sessions, focus, dh - card_h, now, active=active)),
+                              Layout(card, size=card_h))
+        else:
+            side.update(side_panel(store, sessions, focus, dh, now, active=active))
+        root["mid"].split_row(side, Layout(diag))
     else:
         root["mid"].update(diag)
     return root, sessions, focus
@@ -1216,6 +1385,39 @@ def run(accounts, once):
                     continue
                 if keys in (b"q", b"\x03"):
                     break
+                view = ui["session"]
+                if view is not None:
+                    # dos focos al estilo vim: la lista (j/k elige sesión) y la conversación (j/k desplaza)
+                    page = max(1, view["rows"] - 2)
+                    here = view["last"] if view["top"] is None else view["top"]
+                    inside = view["pane"] == "out"
+                    handled = True
+                    if keys in (b"s", b"S", b"\x1b"):
+                        ui["session"] = None
+                    elif keys in (b"h", b"\x1b[D"):
+                        view["pane"] = "list"
+                    elif keys in (b"l", b"\x1b[C", b"\r", b"\n"):
+                        view["pane"] = "out"
+                    elif inside and keys in (b"k", b"\x1b[A"):
+                        view["top"] = max(0, here - 1)
+                    elif inside and keys in (b"j", b"\x1b[B"):
+                        view["top"] = here + 1
+                    elif keys in (b"b", b"\x1b[5~"):
+                        view["top"] = max(0, here - page)
+                    elif keys in (b" ", b"\x1b[6~"):
+                        view["top"] = here + page
+                    elif keys in (b"g", b"\x1b[H", b"\x1b[1~"):
+                        view["top"] = 0
+                    elif keys in (b"G", b"\x1b[F", b"\x1b[4~"):
+                        view["top"] = None
+                    else:
+                        handled = False
+                    if handled:
+                        continue
+                elif keys in (b"s", b"S"):
+                    if focus:
+                        ui["session"] = {"top": None, "rows": 1, "last": 0, "pane": "list"}
+                    continue
                 ids = [v["id"] for v in store.visible(focus, now, ui["all"], ui["sel"])]
                 page = max(1, ui["rows"] - 1)
                 if keys in (b"l", b"h", b"\x1b[C", b"\x1b[D"):
@@ -1253,6 +1455,8 @@ def run(accounts, once):
                     i = sessions.index(focus) if focus in sessions else 0
                     focus_sid, ui["sel"] = sessions[(i + step) % len(sessions)].sid, None
                     ui["scroll"] = 0
+                    if ui["session"] is not None:
+                        ui["session"]["top"] = None
     except KeyboardInterrupt:
         pass
     finally:
