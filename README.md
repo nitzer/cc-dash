@@ -82,6 +82,21 @@ y líneas de código cambiadas.
 La ventana de contexto no figura en los transcripts: se asume 1M si el modelo
 lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
 
+## Saltar a una sesión, avisos, pulso y temas
+
+- **`Enter`** lleva tu cliente de tmux al panel donde corre la sesión
+  enfocada. Hace falta que tanto `cc-dash` como la sesión estén dentro de tmux
+  en la misma máquina.
+- **Avisos:** cuando una sesión pasa a esperarte, cuando termina tras más de
+  un minuto de trabajo o cuando falla un subagente, suena el pitido de la
+  terminal, aparece un mensaje en la barra de tmux y queda una línea `aviso`
+  en el log. `m` los silencia (`alerts = false` en la configuración).
+- **Pulso:** cada sesión muestra una línea tipo electrocardiograma con las
+  herramientas usadas en los últimos 10 minutos, en la lista de sesiones y,
+  más grande, en la cabecera del lead junto a las herramientas por minuto.
+- **Temas:** `T` cambia entre `clasico`, `neon`, `matrix` y `ambar`; los tres
+  últimos usan un marco tipo HUD (solo esquinas). También `cc-dash --theme neon`.
+
 ## Sesiones que esperan tu respuesta
 
 Cuando una sesión se detiene a la espera de un permiso, una pregunta, la
@@ -110,6 +125,8 @@ El archivo es `~/.config/cc-dash/config.toml` y se puede editar a mano:
 include_default = true          # añade ~/.claude si no está listada
 auto_update = true              # se actualiza solo al arrancar
 layout = "lista"                # diseño del panel de agentes
+theme = "neon"                  # clasico, neon, matrix o ambar
+alerts = true                   # pitido y aviso de tmux
 scan = ["/srv/dev/claude"]
 
 [[account]]

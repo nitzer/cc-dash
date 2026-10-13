@@ -9,6 +9,8 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
+        Enter salta al panel de tmux de la sesión enfocada
+        T cambia el tema (clasico, neon, matrix, ambar) · m silencia los avisos
         d cambia el diseño del panel de agentes (lista, tabla, tarjetas,
           tiempo, diagrama); la elección se guarda en la configuración
         f limita el log a la sesión enfocada (con un subagente seleccionado,
@@ -53,7 +55,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -69,11 +71,56 @@ WAIT = "#f2c94c"      # una sesión detenida esperando al usuario
 CARD_BG = "#1c2740"   # fondo de la tarjeta de detalles de la sesión
 FG = "#c9d1e4"
 
+DONE = "#4f6f9f"      # barra de un subagente ya terminado
+
+# Cada tema da un color a cada papel; dentro de un tema no se repiten.
+THEMES = {
+    "clasico": dict(LEAD="#e8915a", SWARM="#6fb1ff", TOOL="#6fcf97", ADVISOR="#b48efc", ERR="#ef6b73",
+                    WAIT="#f2c94c", DIM="#5c6680", LINE="#3b4560", FG="#c9d1e4", CARD_BG="#1c2740",
+                    DONE="#4f6f9f"),
+    "neon": dict(LEAD="#ff2bd6", SWARM="#00e5ff", TOOL="#b6ff00", ADVISOR="#9d4dff", ERR="#ff3355",
+                 WAIT="#fff200", DIM="#7a6fa8", LINE="#3d2a66", FG="#e8e6ff", CARD_BG="#1b0f33",
+                 DONE="#1b8fa3"),
+    "matrix": dict(LEAD="#39ff14", SWARM="#00ff9c", TOOL="#b6ff00", ADVISOR="#7dffb0", ERR="#ff4d4d",
+                   WAIT="#eaff00", DIM="#2f8f3a", LINE="#17581f", FG="#b8ffc0", CARD_BG="#06220b",
+                   DONE="#1f9a45"),
+    "ambar": dict(LEAD="#ffb000", SWARM="#ffd166", TOOL="#ffe9a8", ADVISOR="#ff8c42", ERR="#ff4d2e",
+                  WAIT="#ffffff", DIM="#9a7526", LINE="#5c4412", FG="#ffdca6", CARD_BG="#261c06",
+                  DONE="#b3832a"),
+}
+# Marco tipo HUD para los temas no clásicos: solo esquinas, sin laterales.
+HUD_BOX = box.Box("⌜─ ⌝\n    \n    \n    \n    \n    \n    \n⌞─ ⌟\n")
+HUD_HEAVY = box.Box("▛▀▀▜\n▌  ▐\n▌  ▐\n▌  ▐\n▌  ▐\n▌  ▐\n▌  ▐\n▙▄▄▟\n")
+THEME = dict(THEMES["clasico"])   # papel -> color del tema activo
+HUD = False
+PANEL_BOX, CARD_BOX = box.SQUARE, box.HEAVY
+
+
+def apply_theme(name):
+    """Cambia los colores y el marco de todo el dashboard."""
+    global HUD, PANEL_BOX, CARD_BOX
+    colors = THEMES.get(name, THEMES["clasico"])
+    globals().update(colors)
+    THEME.clear()
+    THEME.update(colors)
+    HUD = name in THEMES and name != "clasico"
+    PANEL_BOX, CARD_BOX = (HUD_BOX, HUD_HEAVY) if HUD else (box.SQUARE, box.HEAVY)
+
+
+def label(text, tag="SYS"):
+    """Título de panel: en los temas HUD, en mayúsculas y con prefijo de sistema."""
+    return f"{tag}//{text.upper()}" if HUD else text
+
+
 AGENT_TOOLS = ("Agent", "Task")
 ASK_TOOLS = {"AskUserQuestion": "responder una pregunta", "ExitPlanMode": "aprobar el plan"}
-# estado -> (icono, texto, color)
-STATES = {"waiting": ("◆", "espera tu respuesta", WAIT), "busy": ("●", "trabajando", LEAD),
-          "idle": ("○", "esperando prompt", TOOL), "ended": ("·", "cerrada", DIM)}
+# estado -> (icono, texto, papel de color)
+STATES = {"waiting": ("◆", "espera tu respuesta", "WAIT"), "busy": ("●", "trabajando", "LEAD"),
+          "idle": ("○", "esperando prompt", "TOOL"), "ended": ("·", "cerrada", "DIM")}
+
+
+def state_color(state):
+    return THEME[STATES[state][2]]
 MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
@@ -193,7 +240,8 @@ def config_path():
 
 
 def load_config():
-    cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista"}
+    cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista",
+           "theme": "clasico", "alerts": True}
     try:
         with open(config_path(), "rb") as fh:
             raw = tomllib.load(fh)
@@ -206,6 +254,8 @@ def load_config():
     cfg["include_default"] = bool(raw.get("include_default", True))
     cfg["auto_update"] = bool(raw.get("auto_update", True))
     cfg["layout"] = raw.get("layout") if raw.get("layout") in LAYOUTS else "lista"
+    cfg["theme"] = raw.get("theme") if raw.get("theme") in THEMES else "clasico"
+    cfg["alerts"] = bool(raw.get("alerts", True))
     return cfg
 
 
@@ -221,6 +271,9 @@ def save_config(cfg):
         f"auto_update = {'true' if cfg['auto_update'] else 'false'}",
         "# layout: diseño del panel de agentes (lista, tabla, tarjetas, tiempo, diagrama); tecla d.",
         f"layout = {json.dumps(cfg['layout'])}",
+        "# theme: clasico, neon, matrix o ambar (tecla T). alerts: pitido y aviso de tmux (tecla m).",
+        f"theme = {json.dumps(cfg['theme'])}",
+        f"alerts = {'true' if cfg['alerts'] else 'false'}",
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
     ]
     for a in cfg["account"]:
@@ -375,6 +428,7 @@ class Session:
         self.pending = {}   # tool_use_id -> (name, label, ts)
         self.agents = []    # lanzamientos vistos en el transcript principal
         self.side = {}      # agentId -> actividad leída del transcript del subagente
+        self.beats = deque(maxlen=1500)  # momento de cada herramienta usada: el pulso de la sesión
         self.requests = {}  # requestId -> tokens de salida ya contados
         self.items = []     # conversación: prompts, texto del asistente y herramientas
         self.open_items = {}  # tool_use_id -> item a la espera de su resultado
@@ -406,6 +460,8 @@ class Store:
         self.offsets = {}
         self.files = []     # (ruta, nombre de cuenta)
         self.live = {}      # sid -> info de ~/.claude/sessions
+        self.ready = False  # tras la carga inicial: desde ahí los fallos generan aviso
+        self.alerts = []    # (sid, texto) pendientes de avisar
         self.aid_of = {}    # tool_use_id del lanzamiento -> agentId (de *.meta.json)
         self.agent_type = {}
         self.meta_seen = set()
@@ -501,6 +557,8 @@ class Store:
     def event(self, ts, sid, style, tag, text, agent=None, ref=None):
         """`agent`: id del lanzamiento o agentId del subagente al que pertenece el evento.
         `ref`: de dónde sacar el detalle (un item de la conversación o {"k": "agent", "id": …})."""
+        # se guarda el papel ("TOOL"), no el color, para que el log siga al tema
+        style = next((role for role, color in THEME.items() if color == style), style)
         self.log.append((ts, sid, style, tag, text, agent, ref))
 
     def attach(self, s, b):
@@ -514,8 +572,10 @@ class Store:
             s.rev += 1
         return item
 
-    def count_tool(self, s, name, inp):
+    def count_tool(self, s, name, inp, ts=0.0):
         s.tools += 1
+        if ts:
+            s.beats.append(ts)
         s.tool_counts[short_tool(name)] += 1
         if name == "Skill" and isinstance(inp, dict) and inp.get("skill"):
             s.skills[inp["skill"]] += 1
@@ -616,7 +676,7 @@ class Store:
                 if b.get("type") == "text" and not side and (b.get("text") or "").strip():
                     s.add_item({"k": "text", "ts": ts, "text": b["text"].strip()})
                 if b.get("type") == "tool_use":
-                    self.count_tool(s, name, inp)
+                    self.count_tool(s, name, inp, ts)
                     label = tool_label(name, inp)
                     if not side:
                         shown = f"{inp.get('subagent_type') or 'general'}: {label}" if name in AGENT_TOOLS else label
@@ -699,7 +759,7 @@ class Store:
                 info["tools"] += 1
                 info["tool"] = (short_tool(name), tool_label(name, inp))
                 info["done"] = None
-                self.count_tool(s, name, inp)
+                self.count_tool(s, name, inp, ts)
                 item = s.open_items[b.get("id")] = {
                     "k": "tool", "ts": ts, "name": info["tool"][0], "label": info["tool"][1], "res": None,
                     "more": 0, "err": False, "out": None, "input": clip_input(inp)}
@@ -719,6 +779,8 @@ class Store:
         a["end"] = ts or time.time()
         a["status"] = status
         ok = status == "completed"
+        if self.ready and not ok:
+            self.alerts.append((s.sid, f"falló el subagente «{a['desc']}» de {self.label(s)}"))
         self.event(ts, s.sid, SWARM if ok else ERR, "Agent",
                    f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})", a["id"],
                    {"k": "agent", "id": a["id"]})
@@ -870,6 +932,22 @@ def breath(color, now, offset=0.0):
     return blend(LINE, color, 0.15 + 0.85 * k)
 
 
+def pulse(beats, now, width, span=600):
+    """Actividad de los últimos `span` segundos como línea braille tipo electro.
+    Devuelve (caracteres, lista de cuáles tienen pico)."""
+    n = width * 2
+    counts = [0] * n
+    for t in beats:
+        back = now - t
+        if 0 <= back < span:
+            counts[n - 1 - int(back / span * n)] += 1
+    top = max(counts) or 1
+    levels = [1 + -(-3 * c // top) if c else 1 for c in counts]   # 1 = línea base, 2-4 = pico
+    left, right = (0x40, 0x04, 0x02, 0x01), (0x80, 0x20, 0x10, 0x08)
+    chars = "".join(chr(0x2800 + sum(left[:levels[i]]) + sum(right[:levels[i + 1]])) for i in range(0, n, 2))
+    return chars, [levels[i] > 1 or levels[i + 1] > 1 for i in range(0, n, 2)]
+
+
 def hpath(x0, x1, y):
     step = 1 if x1 >= x0 else -1
     return [(x, y) for x in range(x0, x1 + step, step)]
@@ -1019,7 +1097,6 @@ def diagram(store, s, w, compact, now, sel=None, show_all=False):
 # ── diseños alternativos del panel de agentes (tecla d) ──────────────────
 
 LAYOUTS = ("lista", "tabla", "tarjetas", "tiempo", "diagrama")
-DONE = "#4f6f9f"   # barra de un subagente ya terminado
 
 
 def segs(cv, x, y, parts):
@@ -1104,7 +1181,16 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     if s.advisor:
         extra.append(f"advisor {short_model(s.advisor)}")
     cv.put(x + 3, 2, trunc(" · ".join(extra), max(0, w - x - 3)), DIM)
-    return 4
+    bw = max(10, min(48, w - 44))
+    x = segs(cv, 0, 3, [("pulso    ", DIM)])
+    chars, hot = pulse(s.beats, now, bw)
+    for i, (ch, peak) in enumerate(zip(chars, hot)):
+        cv.put(x + i, 3, ch, color if peak else LINE)
+    rate = sum(1 for t in s.beats if 0 <= now - t < 60)
+    last = max(s.beats) if s.beats else 0
+    cv.put(x + bw + 2, 3, trunc(f"{rate} tools/min" + (f" · última hace {age(now - last)}" if last else ""),
+                                max(0, w - x - bw - 2)), DIM)
+    return 5
 
 
 def time_window(agents, now, floor=1800):
@@ -1286,20 +1372,21 @@ def header(store, sessions, account, now):
     busy = sum(1 for s in sessions if store.state(s) == "busy")
     open_ = sum(1 for s in sessions if store.state(s) != "ended")
     title = Text(justify="center")
-    title.append("CLAUDE CODE", style="bold")
+    sep = "  //  " if HUD else "  ·  "
+    title.append("▚▚ CLAUDE CODE" if HUD else "CLAUDE CODE", style=f"bold {LEAD}" if HUD else "bold")
     if store.multi:
-        title.append("  ·  ", style=DIM)
+        title.append(sep, style=DIM)
         title.append(f"CUENTA {account.upper()}" if account else f"{len(store.accounts)} CUENTAS",
                      style=f"bold {ADVISOR}")
-    title.append("  ·  ", style=DIM)
+    title.append(sep, style=DIM)
     title.append(f"{open_} SESIÓN ABIERTA" if open_ == 1 else f"{open_} SESIONES ABIERTAS", style=f"bold {LEAD}")
-    title.append("  ·  ", style=DIM)
+    title.append(sep, style=DIM)
     title.append(f"{busy} TRABAJANDO", style=f"bold {SWARM if busy else DIM}")
     waiting = sum(1 for s in sessions if store.state(s) == "waiting")
     if waiting:
-        title.append("  ·  ", style=DIM)
+        title.append(sep, style=DIM)
         title.append(f"◆ {waiting} ESPERA{'N' if waiting != 1 else ''} TU RESPUESTA", style=f"bold {breath(WAIT, now)}")
-    title.append("  ·  ", style=DIM)
+    title.append(sep, style=DIM)
     title.append(time.strftime("%H:%M:%S", time.localtime(now)), style=DIM)
     legend = Text(justify="center")
     for color, name in ((LEAD, "lead"), (SWARM, "subagentes"), (TOOL, "herramientas"), (ADVISOR, "advisor")):
@@ -1316,7 +1403,7 @@ def side_panel(store, sessions, focus, rows, now, active=False):
     first = max(0, at - fit + 1)   # la lista se desplaza para no perder el cursor
     for s in sessions[first: first + fit]:
         state = store.state(s)
-        dot, _, color = STATES[state]
+        dot, color = STATES[state][0], state_color(state)
         if state == "waiting":
             color = f"bold {breath(WAIT, now)}"
         mark = "▸" if s is focus else " "
@@ -1326,11 +1413,15 @@ def side_panel(store, sessions, focus, rows, now, active=False):
         body.append(f"{dot} ", style=color)
         body.append(name, style="bold reverse" if s is focus else (FG if state != "ended" else DIM))
         body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=DIM)
-        if state == "waiting":
-            body.append("    " + trunc("necesita " + store.waiting_for(s), width - 4) + "\n", style=WAIT)
-        else:
-            body.append("    " + trunc(s.title or s.cwd.replace(HOME, "~") or "—", width - 4) + "\n", style=DIM)
-    return Panel(body, title="sesiones", title_align="left", box=box.SQUARE,
+        pw = 9
+        text = "necesita " + store.waiting_for(s) if state == "waiting" else s.title or s.cwd.replace(HOME, "~") or "—"
+        text = trunc(text, width - 5 - pw)
+        body.append("    " + text + " " * (width - 4 - pw - len(text)), style=WAIT if state == "waiting" else DIM)
+        chars, hot = pulse(s.beats, now, pw)
+        for ch, peak in zip(chars, hot):
+            body.append(ch, style=state_color(state) if peak else LINE)
+        body.append("\n")
+    return Panel(body, title=label("sesiones"), title_align="left", box=PANEL_BOX,
                  border_style=LEAD if active else LINE)
 
 
@@ -1339,7 +1430,7 @@ def session_card(store, s, now):
     state = store.state(s)
     live = store.live.get(s.sid) or {}
     label, color = {"waiting": "◆ te espera", "busy": "● trabajando", "idle": "○ esperando",
-                    "ended": "· cerrada"}[state], STATES[state][2]
+                    "ended": "· cerrada"}[state], state_color(state)
     width = 30
     rows = []
 
@@ -1383,14 +1474,14 @@ def session_card(store, s, now):
     for n, (key, value) in enumerate(rows):
         t.append(f"{key:<10}", style=DIM)
         t.append(value + ("\n" if n < len(rows) - 1 else ""), style=FG)
-    panel = Panel(t, title="detalles", title_align="left", box=box.HEAVY, border_style=LEAD,
+    panel = Panel(t, title=label("detalles", "DATA"), title_align="left", box=CARD_BOX, border_style=LEAD,
                   style=f"on {CARD_BG}")
     return panel, len(rows) + 4
 
 
 def log_events(store, focus, account, agent=None, only_focus=False):
     """(eventos, título, filtrado): el log general, el de un subagente o el de la sesión enfocada."""
-    title = "session log"
+    title = label("session log", "LOG")
     if agent is not None:
         own = {agent["id"], agent["aid"]} - {None}
         return [e for e in store.log if e[5] in own], f"{title} · solo {agent['type']}: {agent['desc']}", True
@@ -1419,7 +1510,7 @@ def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, b
         if col:
             name = trunc(store.label(s), col) if s else sid[:8]
             line.append(f"{name:<{col}} ", style=FG if s is focus else DIM)
-        line.append(f"{trunc(tag, 10):<10} ", style=style)
+        line.append(f"{trunc(tag, 10):<10} ", style=THEME.get(style, style))
         line.append(trunc(text, max(10, width - 25 - col - gutter)), style=FG if s is focus or picked else DIM)
         if picked:
             line.pad_right(max(0, width - 4 - len(line.plain)))
@@ -1429,14 +1520,14 @@ def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, b
             body.append("\n")
     if not events:
         body.append("sin eventos todavía", style=DIM)
-    return Panel(body, title=trunc(title, max(10, width - 6)), title_align="left", box=box.SQUARE,
+    return Panel(body, title=trunc(title, max(10, width - 6)), title_align="left", box=PANEL_BOX,
                  border_style=border)
 
 
 def event_panel(store, e, view, rows, width, now):
     """Recuadro de color con el detalle completo de la entrada del log bajo el cursor."""
     inside = view["pane"] == "out"
-    frame = dict(box=box.HEAVY, border_style=LEAD if inside else SWARM, style=f"on {CARD_BG}",
+    frame = dict(box=CARD_BOX, border_style=LEAD if inside else SWARM, style=f"on {CARD_BG}",
                  title_align="left", subtitle_align="right")
     if e is None:
         return Panel(Text("el log está vacío", style=DIM), title="detalle", **frame)
@@ -1525,7 +1616,7 @@ def stats_panel(store, s, now):
     """Actividad de la sesión enfocada: lo que se muestra sin subagente seleccionado."""
     t = Text()
     if s is None:
-        return Panel(t, title="actividad", title_align="left", box=box.SQUARE, border_style=LINE)
+        return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
 
     def row(label, value, style=FG):
         t.append(f"{label:<11}", style=DIM)
@@ -1581,7 +1672,7 @@ def stats_panel(store, s, now):
         code.append(f"rama {s.branch}")
     if code:
         row("código", " · ".join(code))
-    return Panel(t, title="actividad", title_align="left", box=box.SQUARE, border_style=LINE)
+    return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
 
 
 def detail_panel(store, s, ui, rows, width, now):
@@ -1617,7 +1708,7 @@ def detail_panel(store, s, ui, rows, width, now):
     pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
     return Panel(Group(tabs, Text(""), body), title=trunc(f"{head} · {v['desc']}", max(10, width - 6)),
                  title_align="left", subtitle=pos if len(lines) > body_rows else None,
-                 subtitle_align="right", box=box.SQUARE, border_style=SWARM)
+                 subtitle_align="right", box=PANEL_BOX, border_style=SWARM)
 
 
 _lines_cache = {}
@@ -1664,7 +1755,7 @@ def transcript_lines(s, width):
 def session_panel(store, s, view, rows, width, now):
     """Conversación de la sesión, en el lugar del diagrama. view["top"] None = seguir en vivo."""
     if s is None:
-        return Panel(Text("sin sesión", style=DIM), box=box.SQUARE, border_style=LEAD)
+        return Panel(Text("sin sesión", style=DIM), box=PANEL_BOX, border_style=LEAD)
     lines = transcript_lines(s, max(20, width - 4))
     last = max(0, len(lines) - rows)
     if view["top"] is not None and view["top"] >= last:
@@ -1684,10 +1775,10 @@ def session_panel(store, s, view, rows, width, now):
     else:
         pos = f"líneas {top + 1}–{min(len(lines), top + rows)} de {len(lines)} · Fin para seguir en vivo"
     return Panel(body, title=trunc(title, max(10, width - 6)), title_align="left", subtitle=pos,
-                 subtitle_align="right", box=box.SQUARE, border_style=LEAD if view["pane"] == "out" else LINE)
+                 subtitle_align="right", box=PANEL_BOX, border_style=LEAD if view["pane"] == "out" else LINE)
 
 
-def footer(store, s, auto, account, now, sel=False, hint=None):
+def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
     t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         t.append("q salir", style=DIM)
@@ -1701,19 +1792,22 @@ def footer(store, s, auto, account, now, sel=False, hint=None):
         t.append(f"[{value}]", style=f"bold {color}")
 
     agents = store.agents(s)
-    field("lead", state, STATES[state][2])
+    field("lead", state, state_color(state))
     field("subagents", f"{sum(1 for v in agents if v['running'])}/{len(agents)}", SWARM)
     field("advisor", "on call" if s.advisor else "off", ADVISOR)
     field("tools", len(s.pending) if state != "ended" else 0, TOOL)
     if store.multi:
         field("cuenta", account or "todas", ADVISOR)
+    if flash:
+        t.append(f"   ◆ {flash}", style=f"bold {WAIT}")
+        return t
     if hint:
         t.append(f"   {hint}", style=DIM)
         return t
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "d diseño · s log · v conversación · ←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "Enter ir · d diseño · T tema · s log · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
@@ -1733,6 +1827,8 @@ def mode_hint(ui):
 def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
+            "theme": "clasico", "alerts": True,
+            "flash": ("", 0.0),  # (mensaje, hasta cuándo) en la barra inferior
             "session": None,  # conversación abierta (v): {"top", "rows", "last", "pane": "list" | "out"}
             "log": None}      # cursor en el log (s): {"cur": evento | None, "scroll", "rows", "pane"}
 
@@ -1778,7 +1874,7 @@ def render(console, store, focus_sid, account, now, ui=None):
         Layout(name="mid", size=dh + 2),
         bottom,
         Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"]),
-                      hint=mode_hint(ui)),
+                      hint=mode_hint(ui), flash=ui["flash"][0] if now < ui["flash"][1] else None),
                name="foot", size=1),
     )
     if ui["session"] is not None:
@@ -1791,7 +1887,7 @@ def render(console, store, focus_sid, account, now, ui=None):
             body = diagram(store, focus, inner, compact, now, ui["sel"], ui["all"])
         else:
             body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"])
-        diag = Panel(body, box=box.SQUARE, border_style=LINE,
+        diag = Panel(body, box=PANEL_BOX, border_style=LINE,
                      title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left",
                      subtitle=f"diseño: {ui['layout']} · d cambia", subtitle_align="right")
     if wide:
@@ -1829,6 +1925,61 @@ def read_keys(fd, timeout):
     return os.read(fd, 64) if ready else b""
 
 
+def watch(store, sessions, seen, now):
+    """Avisos (sid, texto) por cambios de estado desde la pasada anterior."""
+    out = []
+    for s in sessions:
+        state = store.state(s)
+        was, since = seen.get(s.sid, (None, now))
+        if was == state:
+            continue
+        if was is not None:
+            if state == "waiting":
+                out.append((s.sid, f"{store.label(s)} necesita {store.waiting_for(s)}"))
+            elif state == "idle" and was in ("busy", "waiting") and now - since >= 60:
+                out.append((s.sid, f"{store.label(s)} terminó tras {age(now - since)}"))
+        # el reloj corre desde que empezó a trabajar; pasar por "waiting" no lo reinicia
+        if not (state in ("busy", "waiting") and was in ("busy", "waiting")):
+            since = now
+        seen[s.sid] = (state, since)
+    out += store.alerts
+    store.alerts.clear()
+    return out
+
+
+def notify(store, ui, sid, text, now):
+    ui["flash"] = (text, now + 6)
+    store.event(now, sid, "WAIT", "aviso", text)
+    if not ui["alerts"]:
+        return
+    sys.stdout.write("\a")
+    sys.stdout.flush()
+    if os.environ.get("TMUX"):
+        try:
+            subprocess.run(["tmux", "display-message", "-d", "4000", f"cc-dash: {text}"],
+                           capture_output=True, timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def jump(store, s):
+    """Lleva el cliente de tmux al panel donde corre la sesión. Devuelve el mensaje a mostrar."""
+    where = re.match(r"(.*):(@\d+)\.(%\d+)$", (store.live.get(s.sid) or {}).get("tmux") or "")
+    if not where:
+        return "esa sesión no corre dentro de tmux (o ya está cerrada)"
+    if not os.environ.get("TMUX"):
+        return "cc-dash no está dentro de tmux: no puede cambiar de panel"
+    session, window, pane = where.groups()
+    try:
+        subprocess.run(["tmux", "switch-client", "-t", session], capture_output=True, timeout=3)
+        moved = subprocess.run(["tmux", "select-window", "-t", window], capture_output=True, text=True, timeout=3)
+        if moved.returncode == 0:
+            moved = subprocess.run(["tmux", "select-pane", "-t", pane], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"tmux no respondió: {exc}"
+    return f"→ {store.label(s)}" if moved.returncode == 0 else f"tmux: {moved.stderr.strip()}"
+
+
 def split_keys(raw):
     """Separa lo leído en teclas sueltas: al mantener una tecla llegan varias juntas."""
     return re.findall(rb"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|[\x00-\xff]", raw, re.S)
@@ -1839,8 +1990,10 @@ def run(accounts, once, cfg):
     store = Store(accounts)
     store.poll(time.time())
     account = None
+    store.ready = True
     ui = new_ui()
-    ui["layout"] = cfg["layout"]
+    ui["layout"], ui["theme"], ui["alerts"] = cfg["layout"], cfg["theme"], cfg["alerts"]
+    apply_theme(ui["theme"])
     if once or not sys.stdout.isatty():
         console.print(render(console, store, None, account, time.time(), ui)[0])
         return
@@ -1848,6 +2001,7 @@ def run(accounts, once, cfg):
     fd = sys.stdin.fileno() if termios is not None and sys.stdin.isatty() else None
     saved = termios.tcgetattr(fd) if fd is not None else None
     focus_sid = None
+    seen = {}        # sid -> (estado, desde cuándo trabaja), para los avisos
     queue = deque()  # teclas leídas y aún sin procesar
     try:
         if fd is not None:
@@ -1857,6 +2011,8 @@ def run(accounts, once, cfg):
                 now = time.time()
                 store.poll(now)
                 root, sessions, focus = render(console, store, focus_sid, account, now, ui)
+                for sid, text in watch(store, sessions, seen, now):
+                    notify(store, ui, sid, text, now)
                 if not queue:
                     live.update(root, refresh=True)
                     queue.extend(split_keys(read_keys(fd, 0.12)))
@@ -1967,6 +2123,22 @@ def run(accounts, once, cfg):
                     ui["all"] = not ui["all"]
                 elif keys == b"f":
                     ui["only"] = not ui["only"]
+                elif keys in (b"\r", b"\n"):
+                    if focus:
+                        ui["flash"] = (jump(store, focus), now + 4)
+                elif keys in (b"T", b"m"):
+                    if keys == b"T":
+                        names = list(THEMES)
+                        ui["theme"] = cfg["theme"] = names[(names.index(ui["theme"]) + 1) % len(names)]
+                        apply_theme(ui["theme"])
+                        ui["flash"] = (f"tema: {ui['theme']}", now + 2)
+                    else:
+                        ui["alerts"] = cfg["alerts"] = not ui["alerts"]
+                        ui["flash"] = ("avisos activados" if ui["alerts"] else "avisos silenciados", now + 2)
+                    try:
+                        save_config(cfg)
+                    except OSError:
+                        pass
                 elif keys == b"d":
                     ui["layout"] = LAYOUTS[(LAYOUTS.index(ui["layout"]) + 1) % len(LAYOUTS)]
                     cfg["layout"] = ui["layout"]
@@ -2019,6 +2191,7 @@ def main():
     ap.add_argument("--once", action="store_true", help="imprime un solo fotograma y sale")
     ap.add_argument("--no-update", action="store_true", help="no busca actualizaciones al arrancar")
     ap.add_argument("--layout", choices=LAYOUTS, help="diseño del panel de agentes para esta ejecución")
+    ap.add_argument("--theme", choices=list(THEMES), help="tema de colores para esta ejecución")
     ap.add_argument("-a", "--account", action="append", metavar="CUENTA",
                     help="muestra solo esta cuenta (repetible)")
     sub = ap.add_subparsers(dest="cmd")
@@ -2084,6 +2257,8 @@ def main():
         auto_update()
     if args.layout:
         cfg["layout"] = args.layout
+    if args.theme:
+        cfg["theme"] = args.theme
     run(accounts, args.once, cfg)
 
 
