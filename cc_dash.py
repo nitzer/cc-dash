@@ -9,7 +9,8 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
-        o muestra la lista de tareas de la sesión (hechas, en curso y pendientes)
+        o muestra las tareas de la sesión: subagentes y comandos en segundo plano,
+          y su lista de pendientes si lleva una
         n muestra el registro de novedades · x cierra todos los toasts
         X apaga o enciende los toasts de forma permanente
         , abre la ventana de configuración (j/k mover, h/l cambiar, r por defecto, Esc cerrar)
@@ -66,7 +67,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -143,7 +144,7 @@ TOAST_MAX = 4        # toasts visibles a la vez
 FRESH = 4            # segundos que dura el efecto de una tarea recién terminada
 # tipo de novedad -> (icono, título, papel de color, ruidosa: pitido + mensaje de tmux + log)
 NEWS = {"wait": ("◆", "te espera", "WAIT", True), "stuck": ("⚠", "posible atasco", "ERR", True),
-        "fail": ("✗", "falló un subagente", "ERR", True), "done": ("■", "turno terminado", "TOOL", True),
+        "fail": ("✗", "falló una tarea", "ERR", True), "job": ("✓", "comando terminado", "SWARM", False), "done": ("■", "turno terminado", "TOOL", True),
         "task": ("✓", "tarea terminada", "TOOL", False), "agent": ("✓", "subagente terminado", "SWARM", False)}
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
@@ -497,6 +498,7 @@ class Session:
         self.rep_n = 0
         self.spend = deque(maxlen=3000)     # (momento, tokens de salida) para el ritmo de consumo
         self.ctx_marks = deque(maxlen=8)    # contexto al cierre de cada turno
+        self.jobs = {}          # id de tarea -> comando en segundo plano {"tool", "label", "start", "end", "status"}
         self.todos = {}         # id -> {"subject", "active", "status"}: la lista de tareas de la sesión
         self.task_new = {}      # tool_use_id de un TaskCreate a la espera de su id
         self.first = 0.0        # primera actividad vista
@@ -897,6 +899,11 @@ class Store:
                     s.err_streak = 0
                 if done and b.get("is_error"):
                     self.event(ts, sid, ERR, done[0], "✗ " + (done[1] or "error"), ref=item)
+                if result.get("backgroundTaskId") and not any(a["id"] == tid for a in s.agents):
+                    # un comando que quedó corriendo en segundo plano: termina con un aviso aparte
+                    s.jobs[str(result["backgroundTaskId"])] = {
+                        "tool": done[0] if done else "Bash", "label": done[1] if done else "",
+                        "start": (done[2] if done else 0) or ts, "end": None, "status": ""}
                 for a in s.agents:
                     if a["id"] != tid:
                         continue
@@ -947,6 +954,13 @@ class Store:
         for a in s.agents:
             if (a["aid"] or self.aid_of.get(a["id"])) == task.group(1) and a["end"] is None:
                 self.finish(s, a, ts, status.group(1) if status else "completed")
+        job = s.jobs.get(task.group(1))
+        if job and job["end"] is None:
+            job["end"], job["status"] = ts or time.time(), status.group(1) if status else "completed"
+            if self.ready:
+                job["flash"] = time.time()
+                self.alerts.append((s.sid, "job" if job["status"] == "completed" else "fail",
+                                    f"{job['tool']}: {job['label']} ({clock(job['end'] - job['start'])})"))
 
     def finish(self, s, a, ts, status):
         a["end"] = ts or time.time()
@@ -1994,55 +2008,114 @@ def stats_panel(store, s, now):
 
 
 def tasks_panel(store, s, ui, rows, width, now):
-    """La lista de tareas de la sesión: hechas, en curso y pendientes."""
+    """Las tareas de la sesión: lo que corre en segundo plano y, si la lleva, su lista de pendientes."""
     frame = dict(title_align="left", subtitle_align="right", box=PANEL_BOX, border_style=TOOL)
-    tasks = list(s.todos.values()) if s else []
-    if not tasks:
-        return Panel(Text("esta sesión no lleva una lista de tareas", style=DIM),
-                     title=label("tareas", "TODO"), **frame)
-    done = sum(1 for t in tasks if t["status"] == "completed")
-    fill = round(done / len(tasks) * 12)
-    head = Text(no_wrap=True, overflow="ellipsis")
-    head.append("▰" * fill, style=TOOL)
-    head.append("▱" * (12 - fill), style=LINE)
-    left = len(tasks) - done
-    head.append(f" {done} de {len(tasks)} hechas · {left} pendiente{'s' if left != 1 else ''}", style=FG)
+    if s is None:
+        return Panel(Text("sin sesión", style=DIM), title=label("tareas", "TODO"), **frame)
+    inner = max(10, width - 8)
+    alive = store.state(s) != "ended"
+    lines = []      # una Text por fila
+    follow = 0      # fila que conviene tener a la vista: la tarea en curso
 
-    body_rows = max(1, rows - 2)
-    ui["rows"] = body_rows
-    if ui["tasks_of"] != s.sid:   # al cambiar de sesión vuelve a seguir la tarea en curso
+    def row(mark, mark_style, text, style, right=""):
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(f" {mark} ", style=mark_style)
+        body = trunc(text, inner - len(right) - 1)
+        line.append(body, style=style)
+        if right:
+            line.append(" " * max(1, inner - len(body) - len(right)) + right, style=DIM)
+        lines.append(line)
+
+    def section(title, summary):
+        if lines:
+            lines.append(Text(""))
+        head = Text(no_wrap=True, overflow="ellipsis")
+        head.append(title, style=f"bold {SWARM}")
+        head.append(f"  {summary}", style=DIM)
+        lines.append(head)
+
+    def finished(mark_ok, text, fresh, right):
+        """Fila de algo terminado: recién terminado lleva un barrido y brilla; después queda tachado."""
+        if fresh < FRESH:
+            body = trunc(text, inner - len(right) - 1)
+            swept = len(body) if fresh >= 0.7 else int(fresh / 0.7 * len(body))
+            glow = f"bold {breath(TOOL, now * 3)}"
+            line = Text(no_wrap=True, overflow="ellipsis")
+            line.append(" ✦ " if int(now * 4) % 2 else f" {mark_ok} ", style=glow)
+            line.append(body[:swept], style=f"bold {CARD_BG} on {TOOL}" if fresh < 0.7 else glow)
+            line.append(body[swept:], style=FG)
+            line.append(" " * max(1, inner - len(body) - len(right)) + right, style=DIM)
+            lines.append(line)
+        else:
+            row(mark_ok, f"bold {TOOL}", text, f"{DIM} strike", right)
+
+    # subagentes y comandos en segundo plano: lo que Claude Code llama tareas
+    work = [("agent", v["start"], v) for v in store.agents(s)] + [("job", j["start"], j) for j in s.jobs.values()]
+    work.sort(key=lambda w: w[1] or 0)
+    if work:
+        running = sum(1 for kind, _, w in work if (w["running"] if kind == "agent" else w["end"] is None and alive))
+        section("EN SEGUNDO PLANO", f"{running} en marcha · {len(work) - running} terminadas")
+        for kind, _, w in work:
+            if kind == "agent":
+                text = f"{w['type']}: {w['desc']}"
+                live, end, failed = w["running"], w["end"], bool(w["end"]) and w["status"] != "completed"
+                fresh = now - w["end"] if w["end"] else 1e9
+            else:
+                text = f"{w['tool']}: {w['label']}"
+                live, end, failed = w["end"] is None and alive, w["end"], bool(w["end"]) and w["status"] != "completed"
+                fresh = now - w.get("flash", 0)
+            took = clock((now if live else end) - w["start"]) if (live or end) and w["start"] else ""
+            if live:
+                follow = len(lines)
+                row(SPIN[int(now * 9) % len(SPIN)], f"bold {SWARM}", text, f"bold {FG}", took)
+            elif failed:
+                row("✗", f"bold {ERR}", text, ERR, w["status"])
+            elif end:
+                finished("✓", text, fresh, took)
+            else:
+                row("■", DIM, text, DIM, "interrumpida")
+
+    # la lista de pendientes que escribe el propio agente, si tiene esas herramientas
+    tasks = list(s.todos.values())
+    if tasks:
+        done = sum(1 for t in tasks if t["status"] == "completed")
+        fill = round(done / len(tasks) * 12)
+        section("PENDIENTES", f"{done} de {len(tasks)} hechas")
+        bar = Text(no_wrap=True)
+        bar.append(" " + "▰" * fill, style=TOOL)
+        bar.append("▱" * (12 - fill), style=LINE)
+        lines.append(bar)
+        for task in tasks:
+            if task["status"] == "completed":
+                finished("✓", task["subject"], now - task.get("flash", 0), "")
+            elif task["status"] == "in_progress":
+                follow = len(lines)
+                row("▶", f"bold {LEAD}", task["active"] or task["subject"], f"bold {LEAD}")
+            else:
+                row("☐", FG, task["subject"], FG)
+    if not lines:
+        note = Text("esta sesión no tiene tareas: no ha lanzado subagentes ni comandos en segundo plano, "
+                    "y no lleva una lista de pendientes", style=DIM)
+        return Panel(note, title=label("tareas", "TODO"), **frame)
+    if not tasks:
+        lines.append(Text(""))
+        lines.append(Text(" esta sesión no lleva lista de pendientes", style=DIM))
+
+    ui["rows"] = rows
+    if ui["tasks_of"] != s.sid:   # al cambiar de sesión vuelve a seguir lo que está en curso
         ui["tasks_of"], ui["scroll"] = s.sid, -1
-    top = ui["scroll"]
-    if top < 0:  # sin desplazar a mano, la tarea en curso queda a la vista
-        doing = next((i for i, t in enumerate(tasks) if t["status"] == "in_progress"), 0)
-        top = doing - body_rows // 3
-    top = max(0, min(top, len(tasks) - body_rows))
+    top = ui["scroll"] if ui["scroll"] >= 0 else follow - rows // 3
+    top = max(0, min(top, len(lines) - rows))
     ui["tasks_top"] = top
     body = Text(no_wrap=True, overflow="ellipsis")
-    chunk = tasks[top: top + body_rows]
-    for n, task in enumerate(chunk):
-        fresh = now - task.get("flash", 0)
-        if task["status"] == "completed" and fresh < FRESH:
-            # recién terminada: un barrido la recorre y luego queda brillando unos segundos
-            text = trunc(task["subject"], max(10, width - 8))
-            swept = len(text) if fresh >= 0.7 else int(fresh / 0.7 * len(text))
-            glow = f"bold {breath(TOOL, now * 3)}"
-            body.append(" ✦ " if int(now * 4) % 2 else " ✓ ", style=glow)
-            body.append(text[:swept], style=f"bold {CARD_BG} on {TOOL}" if fresh < 0.7 else glow)
-            body.append(text[swept:] + ("\n" if n < len(chunk) - 1 else ""), style=FG)
-            continue
-        if task["status"] == "completed":
-            mark, style, text = "✓", f"{DIM} strike", task["subject"]
-        elif task["status"] == "in_progress":
-            mark, style, text = "▶", f"bold {LEAD}", task["active"] or task["subject"]
-        else:
-            mark, style, text = "☐", FG, task["subject"]
-        body.append(f" {mark} ", style=f"bold {TOOL}" if mark == "✓" else style)
-        body.append(trunc(text, max(10, width - 8)) + ("\n" if n < len(chunk) - 1 else ""), style=style)
-    more = len(tasks) - top - body_rows
-    pos = f"{top + 1}–{top + len(chunk)} de {len(tasks)}" + (" ↓" if more > 0 else "")
-    return Panel(Group(head, Text(""), body), title=label("tareas", "TODO"),
-                 subtitle=pos if len(tasks) > body_rows else None, **frame)
+    chunk = lines[top: top + rows]
+    for n, line in enumerate(chunk):
+        body.append_text(line)
+        if n < len(chunk) - 1:
+            body.append("\n")
+    more = len(lines) - top - rows
+    pos = f"{top + 1}–{top + len(chunk)} de {len(lines)}" + (" ↓" if more > 0 else "")
+    return Panel(body, title=label("tareas", "TODO"), subtitle=pos if len(lines) > rows else None, **frame)
 
 
 def detail_panel(store, s, ui, rows, width, now):
