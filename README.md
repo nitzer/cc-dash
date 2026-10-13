@@ -117,6 +117,30 @@ la cuenta, y cuántos turnos faltan para llenar el contexto al crecimiento
 medio de los últimos turnos. Solo cuenta tokens de salida, y los de los
 subagentes quedan fuera porque sus transcripts no los registran bien.
 
+## Tareas, git, buscar y copiar
+
+- **Tareas:** si la sesión lleva una lista de tareas, la cabecera del lead y
+  el panel de actividad muestran una barra de progreso (`▰▰▰▱▱ 1/4`) y la
+  tarea en curso.
+- **Git:** el panel de actividad muestra, para la carpeta de la sesión
+  enfocada, la rama, los archivos modificados y sin seguimiento, y los commits
+  hechos desde que empezó la sesión. Se consulta cada 20 segundos, sin
+  escribir nada en el repositorio.
+- **`/`** filtra el log por texto mientras escribes: `Enter` deja el filtro
+  puesto y `Esc` lo borra.
+- **`y`** copia al portapapeles lo que tienes delante: la salida de la entrada
+  elegida en el log, la respuesta o el prompt del subagente seleccionado, o la
+  última respuesta de la conversación. Dentro de tmux queda además en su búfer.
+
+## Efectos
+
+`E` los activa o apaga todos (`effects = false` en la configuración):
+
+- una secuencia de arranque de un segundo con lo que se cargó,
+- un parpadeo "glitch" en la cabecera cuando salta un aviso, y
+- lluvia de caracteres en el panel de agentes cuando la sesión enfocada lleva
+  más de un minuto sin trabajar y no tiene subagentes a la vista.
+
 ## Sesiones que esperan tu respuesta
 
 Cuando una sesión se detiene a la espera de un permiso, una pregunta, la
@@ -147,6 +171,7 @@ auto_update = true              # se actualiza solo al arrancar
 layout = "lista"                # diseño del panel de agentes
 theme = "neon"                  # clasico, neon, matrix o ambar
 alerts = true                   # pitido y aviso de tmux
+effects = true                  # arranque, glitch y lluvia en reposo
 scan = ["/srv/dev/claude"]
 
 [[account]]

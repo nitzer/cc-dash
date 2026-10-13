@@ -9,6 +9,8 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
         t muestra/oculta los subagentes ya terminados
+        / busca en el log (Enter aplica, Esc borra) · y copia lo que se está viendo
+        E activa o apaga los efectos (arranque, glitch en avisos, lluvia en reposo)
         Enter salta al panel de tmux de la sesión enfocada
         T cambia el tema (clasico, neon, matrix, ambar) · m silencia los avisos
         d cambia el diseño del panel de agentes (lista, tabla, tarjetas,
@@ -26,10 +28,12 @@ Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash update
 """
 import argparse
+import base64
 import glob
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import sys
@@ -55,7 +59,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -246,7 +250,7 @@ def config_path():
 
 def load_config():
     cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista",
-           "theme": "clasico", "alerts": True}
+           "theme": "clasico", "alerts": True, "effects": True}
     try:
         with open(config_path(), "rb") as fh:
             raw = tomllib.load(fh)
@@ -261,6 +265,7 @@ def load_config():
     cfg["layout"] = raw.get("layout") if raw.get("layout") in LAYOUTS else "lista"
     cfg["theme"] = raw.get("theme") if raw.get("theme") in THEMES else "clasico"
     cfg["alerts"] = bool(raw.get("alerts", True))
+    cfg["effects"] = bool(raw.get("effects", True))
     return cfg
 
 
@@ -279,6 +284,8 @@ def save_config(cfg):
         "# theme: clasico, neon, matrix o ambar (tecla T). alerts: pitido y aviso de tmux (tecla m).",
         f"theme = {json.dumps(cfg['theme'])}",
         f"alerts = {'true' if cfg['alerts'] else 'false'}",
+        "# effects: arranque animado, glitch en los avisos y lluvia en reposo (tecla E).",
+        f"effects = {'true' if cfg['effects'] else 'false'}",
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
     ]
     for a in cfg["account"]:
@@ -439,6 +446,9 @@ class Session:
         self.rep_n = 0
         self.spend = deque(maxlen=3000)     # (momento, tokens de salida) para el ritmo de consumo
         self.ctx_marks = deque(maxlen=8)    # contexto al cierre de cada turno
+        self.todos = {}         # id -> {"subject", "active", "status"}: la lista de tareas de la sesión
+        self.task_new = {}      # tool_use_id de un TaskCreate a la espera de su id
+        self.first = 0.0        # primera actividad vista
         self.beats = deque(maxlen=1500)  # momento de cada herramienta usada: el pulso de la sesión
         self.requests = {}  # requestId -> tokens de salida ya contados
         self.items = []     # conversación: prompts, texto del asistente y herramientas
@@ -460,6 +470,15 @@ class Session:
     def side_info(self, aid):
         return self.side.setdefault(aid, {"tools": 0, "tool": None, "text": "", "final": "",
                                           "out": 0, "done": None, "model": "", "last": 0.0})
+
+    def progress(self):
+        """(hechas, total, texto de la tarea en curso) de la lista de tareas, o None si no hay."""
+        if not self.todos:
+            return None
+        tasks = list(self.todos.values())
+        doing = next((t for t in tasks if t["status"] == "in_progress"), None)
+        return (sum(1 for t in tasks if t["status"] == "completed"), len(tasks),
+                (doing["active"] or doing["subject"]) if doing else "")
 
     def token_rate(self, now, span=300):
         """Tokens de salida por minuto en los últimos `span` segundos."""
@@ -487,6 +506,7 @@ class Store:
         self.offsets = {}
         self.files = []     # (ruta, nombre de cuenta)
         self.live = {}      # sid -> info de ~/.claude/sessions
+        self.git_cache = {}      # carpeta -> (cuándo se consultó, datos | None)
         self.daily = Counter()   # (cuenta, (año, mes, día)) -> tokens de salida
         self.ready = False  # tras la carga inicial: desde ahí los fallos generan aviso
         self.alerts = []    # (sid, texto) pendientes de avisar
@@ -615,6 +635,27 @@ class Store:
         elif path and name == "Read":
             s.reads.add(path)
 
+    def track_tasks(self, s, tid, name, inp):
+        """Sigue la lista de tareas: TodoWrite la reemplaza entera; TaskCreate/TaskUpdate la editan."""
+        if not isinstance(inp, dict):
+            return
+        if name == "TodoWrite" and isinstance(inp.get("todos"), list):
+            s.todos = {str(i): {"subject": t.get("content") or "", "active": t.get("activeForm") or "",
+                                "status": t.get("status") or "pending"}
+                       for i, t in enumerate(inp["todos"]) if isinstance(t, dict)}
+        elif name == "TaskCreate":
+            s.task_new[tid] = {"subject": inp.get("subject") or "", "active": inp.get("activeForm") or "",
+                               "status": "pending"}
+        elif name == "TaskUpdate" and inp.get("taskId") is not None:
+            key = str(inp["taskId"])
+            if inp.get("status") == "deleted":
+                s.todos.pop(key, None)
+                return
+            task = s.todos.setdefault(key, {"subject": f"tarea {key}", "active": "", "status": "pending"})
+            for src, dst in (("status", "status"), ("subject", "subject"), ("activeForm", "active")):
+                if inp.get(src):
+                    task[dst] = inp[src]
+
     def add_usage(self, s, o, msg, side=None):
         usage = msg.get("usage") or {}
         rid = o.get("requestId")
@@ -644,6 +685,7 @@ class Store:
         ts = parse_ts(o.get("timestamp"))
         if ts:
             s.last = max(s.last, ts)
+            s.first = min(s.first or ts, ts)
         if o.get("cwd"):
             s.cwd = o["cwd"]
         if o.get("gitBranch") and o["gitBranch"] != "HEAD":
@@ -717,6 +759,7 @@ class Store:
                         item = s.open_items[b.get("id")] = s.add_item(
                             {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None,
                              "more": 0, "err": False, "out": None, "input": clip_input(inp)})
+                        self.track_tasks(s, b.get("id"), name, inp)
                         key = (name, json.dumps(inp, sort_keys=True, default=str)[:600])
                         s.rep_n = s.rep_n + 1 if key == s.rep_key else 1
                         s.rep_key = key
@@ -759,6 +802,10 @@ class Store:
                     continue
                 tid = b.get("tool_use_id")
                 item = self.attach(s, b)
+                created = s.task_new.pop(tid, None)
+                if created:
+                    found = re.search(r"Task #(\S+) created", block_text(b.get("content")))
+                    s.todos[found.group(1) if found else f"n{len(s.todos)}"] = created
                 done = s.pending.pop(tid, None)
                 if b.get("is_error"):
                     s.errors += 1
@@ -896,6 +943,32 @@ class Store:
         rest = [s for s in pool if s.sid not in self.live]
         rest.sort(key=lambda s: -s.last)
         return live + rest
+
+    def git_info(self, s, now, refresh=False):
+        """Estado de git de la carpeta de la sesión. Solo consulta con `refresh`, y cada 20 s como mucho."""
+        if not s.cwd:
+            return None
+        checked, info = self.git_cache.get(s.cwd, (0, None))
+        if not refresh or now - checked < 20:
+            return info
+        info = None
+        try:
+            status = git(s.cwd, "--no-optional-locks", "status", "--porcelain=v1", "-b", timeout=3)
+            if status.returncode == 0:
+                lines = status.stdout.splitlines()
+                branch = lines[0][3:].split("...")[0] if lines and lines[0].startswith("## ") else ""
+                files = [ln for ln in lines if not ln.startswith("## ")]
+                since = (self.live.get(s.sid) or {}).get("startedAt")
+                since = since / 1000 if since else s.first
+                commits = git(s.cwd, "rev-list", "--count", f"--since={int(since)}", "HEAD", timeout=3) if since else None
+                info = {"branch": branch,
+                        "untracked": sum(1 for ln in files if ln.startswith("??")),
+                        "changed": sum(1 for ln in files if not ln.startswith("??")),
+                        "commits": int(commits.stdout.strip() or 0) if commits and commits.returncode == 0 else 0}
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        self.git_cache[s.cwd] = (now, info)
+        return info
 
     def stuck(self, s, now):
         """Motivos para sospechar que una sesión que trabaja está atascada (vacío = todo bien)."""
@@ -1263,6 +1336,13 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     cv.put(x + bw + 2, 3, trunc(f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min"
                                 + (f" · última hace {age(now - last)}" if last else ""),
                                 max(0, w - x - bw - 2)), DIM)
+    tasks = s.progress()
+    if tasks:
+        done, total, doing = tasks
+        fill = round(done / total * 12)
+        x = segs(cv, 0, 4, [("tareas   ", DIM), ("▰" * fill, TOOL), ("▱" * (12 - fill), LINE), (f" {done}/{total}", FG)])
+        cv.put(x + 3, 4, trunc(f"▶ {doing}" if doing else "", max(0, w - x - 3)), TOOL)
+        return 6
     return 5
 
 
@@ -1318,7 +1398,7 @@ def agents_header(cv, y, w, everyone, agents, shown, room):
         cv.put(x + 3, y, trunc(" · ".join(notes), max(0, room - x - 3)), DIM)
 
 
-def board(store, s, w, h, now, sel=None, show_all=False, layout="lista"):
+def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_rain=False):
     """Panel del lead y sus subagentes sin flechas, en el diseño elegido."""
     cv = Canvas(w, h)
     if s is None:
@@ -1436,12 +1516,44 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista"):
             cv.put(x + len(trunc(text, max(0, w - x - len(tail)))), row + 1, tail, DIM)
         if not shown:
             cv.put(2, y + 2, empty, DIM)
+    if idle_rain and not agents:
+        rain(cv, y + 4, now)
     return cv.text()
 
 
 # ── paneles ──────────────────────────────────────────────────────────────
 
-def header(store, sessions, account, now):
+def glitched(text, now):
+    """El texto con parte de sus caracteres corrompidos: el parpadeo de un aviso."""
+    rng = random.Random(int(now * 12))
+    out = Text(justify=text.justify)
+    for ch in text.plain:
+        if ch != " " and rng.random() < 0.22:
+            out.append(rng.choice("▓▒░#%&@$<>/\\|"), style=f"bold {rng.choice((ERR, WAIT, SWARM))}")
+        else:
+            out.append(ch, style=f"bold {FG}")
+    return out
+
+
+def rain(cv, top, now):
+    """Lluvia de caracteres en las celdas vacías a partir de la fila `top`: el modo reposo."""
+    glyphs = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉ0123456789"
+    span = cv.h - top
+    if span < 3:
+        return
+    for x in range(0, cv.w, 2):
+        seed = (x * 2654435761 + 97) & 0xffffffff
+        speed, tail = 3 + seed % 5, 4 + (seed >> 3) % 6
+        cycle = span + tail + (seed >> 6) % 14
+        head = int(now * speed + (seed >> 9)) % cycle
+        for k in range(tail):
+            y = head - k
+            if 0 <= y < span and cv.ch[top + y][x] == " ":
+                glyph = glyphs[(seed + y * 7 + (int(now * 6) if k == 0 else 0)) % len(glyphs)]
+                cv.put(x, top + y, glyph, f"bold {FG}" if k == 0 else blend(TOOL, LINE, k / tail))
+
+
+def header(store, sessions, account, now, glitch=False):
     busy = sum(1 for s in sessions if store.state(s) == "busy")
     open_ = sum(1 for s in sessions if store.state(s) != "ended")
     title = Text(justify="center")
@@ -1469,7 +1581,7 @@ def header(store, sessions, account, now):
     for color, name in ((LEAD, "lead"), (SWARM, "subagentes"), (TOOL, "herramientas"), (ADVISOR, "advisor")):
         legend.append("■ ", style=color)
         legend.append(name + "     ", style=DIM)
-    return Group(title, Rule(style=LINE), legend)
+    return Group(glitched(title, now) if glitch else title, Rule(style=LINE), legend)
 
 
 def side_panel(store, sessions, focus, rows, now, active=False):
@@ -1563,8 +1675,18 @@ def session_card(store, s, now):
     return panel, len(rows) + 4
 
 
-def log_events(store, focus, account, agent=None, only_focus=False):
-    """(eventos, título, filtrado): el log general, el de un subagente o el de la sesión enfocada."""
+def log_events(store, focus, account, agent=None, only_focus=False, find=""):
+    """(eventos, título, filtrado): el log general, el de un subagente o el de la sesión enfocada.
+    `find` deja solo las entradas que contienen ese texto."""
+    events, title, narrowed = _log_events(store, focus, account, agent, only_focus)
+    if find:
+        needle = find.lower()
+        events = [e for e in events if needle in f"{e[3]} {e[4]}".lower()]
+        title += f" · /{find} ({len(events)})"
+    return events, title, narrowed
+
+
+def _log_events(store, focus, account, agent, only_focus):
     title = label("session log", "LOG")
     if agent is not None:
         own = {agent["id"], agent["aid"]} - {None}
@@ -1731,15 +1853,36 @@ def stats_panel(store, s, now):
         usage.append(f"${s.cost:.2f}")
     row("tokens", " · ".join(usage))
     today = store.daily[(s.account, time.localtime(now)[:3])]
-    row("ritmo", f"{ktok(round(s.token_rate(now)))} tok/min · hoy {ktok(s.tokens_today(now))} esta sesión · "
-                 f"{ktok(today)} la cuenta {s.account}")
+    row("ritmo", f"{ktok(round(s.token_rate(now)))} tok/min · hoy {ktok(s.tokens_today(now))} sesión · "
+                 f"{ktok(today)} cuenta")
     turns = str(s.turns)
     if s.turns:
         turns += f" · último {age(s.turn_last / 1000)} · total {age(s.turn_total / 1000)}"
     row("turnos", turns)
+    tasks = s.progress()
+    if tasks:
+        done, total, doing = tasks
+        fill = round(done / total * 12)
+        t.append(f"{'tareas':<11}", style=DIM)
+        t.append("▰" * fill, style=TOOL)
+        t.append("▱" * (12 - fill), style=LINE)
+        t.append(f" {done}/{total}" + (f" · ▶ {doing}" if doing else "") + "\n", style=FG)
+    code = []
+    info = store.git_info(s, now)
+    if info:
+        code.append(f"{info['branch'] or '—'} · {info['changed']} modificados"
+                    + (f" · {info['untracked']} sin seguimiento" if info["untracked"] else "")
+                    + f" · {info['commits']} commit{'s' if info['commits'] != 1 else ''} en la sesión")
+    elif s.branch:
+        code.append(f"rama {s.branch}")
+    if s.lines and any(s.lines):
+        code.append(f"+{s.lines[0]} −{s.lines[1]} líneas")
+    if code:
+        row("git", " · ".join(code))
     tools = counts(s.tool_counts) or "ninguna"
     row("tools", tools + (f" · {s.errors} con error" if s.errors else ""), TOOL if s.tool_counts else DIM)
-    row("skills", counts(s.skills) or "ninguna", ADVISOR if s.skills else DIM)
+    if s.skills:
+        row("skills", counts(s.skills), ADVISOR)
     if s.edits or s.reads:
         names = Counter()
         for path, n in s.edits.items():
@@ -1753,17 +1896,8 @@ def stats_panel(store, s, now):
     if agents:
         live = sum(1 for v in agents if v["running"])
         row("subagentes", counts(Counter(v["type"] for v in agents)) + (f" · {live} en marcha" if live else ""), SWARM)
-    else:
-        row("subagentes", "ninguno", DIM)
     if s.hooks:
         row("hooks", counts(s.hooks))
-    code = []
-    if s.lines and any(s.lines):
-        code.append(f"+{s.lines[0]} −{s.lines[1]} líneas")
-    if s.branch:
-        code.append(f"rama {s.branch}")
-    if code:
-        row("código", " · ".join(code))
     return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
 
 
@@ -1899,12 +2033,19 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "Enter ir · d diseño · T tema · s log · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "Enter ir · s log · / buscar · y copiar · d diseño · T tema · v conversación · ←→ subagentes · t terminados · f filtra · m avisos · E efectos · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
+def query(ui):
+    """Texto por el que se filtra el log: lo que se está escribiendo o lo ya aplicado."""
+    return ui["typing"].decode("utf-8", "ignore") if ui["typing"] is not None else ui["find"]
+
+
 def mode_hint(ui):
+    if ui["typing"] is not None:
+        return f"buscar: {query(ui)}▌   Enter aplica · Esc borra el filtro"
     if ui["log"] is not None:
         if ui["log"]["pane"] == "out":
             return "jk desplaza el detalle · h vuelve al log · AvPág/RePág · s cierra · q salir"
@@ -1919,7 +2060,9 @@ def mode_hint(ui):
 def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
-            "theme": "clasico", "alerts": True,
+            "theme": "clasico", "alerts": True, "effects": True,
+            "find": "", "typing": None,   # filtro del log y texto que se está escribiendo (bytes)
+            "glitch": 0.0,                # hasta cuándo dura el parpadeo de un aviso
             "flash": ("", 0.0),  # (mensaje, hasta cuándo) en la barra inferior
             "session": None,  # conversación abierta (v): {"top", "rows", "last", "pane": "list" | "out"}
             "log": None}      # cursor en el log (s): {"cur": evento | None, "scroll", "rows", "pane"}
@@ -1941,7 +2084,7 @@ def render(console, store, focus_sid, account, now, ui=None):
 
     detail = detail_panel(store, focus, ui, rows, detail_w, now)
     chosen = next((v for v in store.visible(focus, now, ui["all"], ui["sel"]) if v["id"] == ui["sel"]), None)
-    events, title, narrowed = log_events(store, focus, account, chosen, ui["only"])
+    events, title, narrowed = log_events(store, focus, account, chosen, ui["only"], query(ui))
     lg = ui["log"]
     log_w = width - detail_w if split else width
     if lg is not None:
@@ -1962,11 +2105,11 @@ def render(console, store, focus_sid, account, now, ui=None):
 
     root = Layout()
     root.split_column(
-        Layout(header(store, sessions, account, now), name="head", size=3),
+        Layout(header(store, sessions, account, now, glitch=now < ui["glitch"]), name="head", size=3),
         Layout(name="mid", size=dh + 2),
         bottom,
         Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"]),
-                      hint=mode_hint(ui), flash=ui["flash"][0] if now < ui["flash"][1] else None),
+                      hint=mode_hint(ui), flash=ui["flash"][0] if now < ui["flash"][1] and ui["typing"] is None else None),
                name="foot", size=1),
     )
     if ui["session"] is not None:
@@ -1978,7 +2121,9 @@ def render(console, store, focus_sid, account, now, ui=None):
         if ui["layout"] == "diagrama":
             body = diagram(store, focus, inner, compact, now, ui["sel"], ui["all"])
         else:
-            body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"])
+            resting = (ui["effects"] and focus is not None and store.state(focus) in ("idle", "ended")
+                       and now - focus.last > 60)
+            body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"], idle_rain=resting)
         diag = Panel(body, box=PANEL_BOX, border_style=LINE,
                      title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left",
                      subtitle=f"diseño: {ui['layout']} · d cambia", subtitle_align="right")
@@ -2045,6 +2190,8 @@ def watch(store, sessions, seen, now):
 
 def notify(store, ui, sid, text, now):
     ui["flash"] = (text, now + 6)
+    if ui["effects"]:
+        ui["glitch"] = now + 0.6
     store.event(now, sid, "WAIT", "aviso", text)
     if not ui["alerts"]:
         return
@@ -2076,6 +2223,67 @@ def jump(store, s):
     return f"→ {store.label(s)}" if moved.returncode == 0 else f"tmux: {moved.stderr.strip()}"
 
 
+def shown_text(store, focus, ui, now):
+    """Lo que el usuario tiene delante y tendría sentido copiar."""
+    if ui["log"] is not None:
+        chosen = next((v for v in store.visible(focus, now, ui["all"], ui["sel"]) if v["id"] == ui["sel"]), None)
+        events = log_events(store, focus, account=None, agent=chosen, only_focus=ui["only"], find=query(ui))[0]
+        if not events:
+            return ""
+        e = events[log_cursor(events, ui["log"])]
+        ref = e[6]
+        if ref and ref["k"] == "tool":
+            return ref["out"] or ""
+        if ref and ref["k"] == "prompt":
+            return ref["text"]
+        if ref and ref["k"] == "agent":
+            v = next((v for v in store.agents(store.sessions[e[1]]) if v["id"] == ref["id"]), None) \
+                if e[1] in store.sessions else None
+            return (v["response"] or v["prompt"]) if v else ""
+        return e[4]
+    if ui["sel"] and focus:
+        v = next((v for v in store.agents(focus) if v["id"] == ui["sel"]), None)
+        return (v["prompt"] if ui["tab"] == "prompt" else v["response"]) if v else ""
+    if ui["session"] is not None and focus:
+        return next((it["text"] for it in reversed(focus.items) if it["k"] == "text"), "")
+    return ""
+
+
+def copy_text(text):
+    """Al portapapeles: por tmux si estamos dentro (también deja el texto en su búfer), si no por OSC 52."""
+    data = text.encode()
+    if os.environ.get("TMUX"):
+        for cmd in (["tmux", "load-buffer", "-w", "-"], ["tmux", "load-buffer", "-"]):
+            try:
+                if subprocess.run(cmd, input=data, capture_output=True, timeout=3).returncode == 0:
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    sys.stdout.write("\x1b]52;c;" + base64.b64encode(data).decode() + "\a")
+    sys.stdout.flush()
+
+
+def boot(console, store):
+    """Secuencia de arranque de un segundo, con los datos reales de lo que se cargó."""
+    live = [s for s in store.sessions.values() if s.sid in store.live]
+    steps = [
+        (f"▚▚ CC-DASH v{__version__} // INIT", f"bold {LEAD}"),
+        (f"   cuentas ........ {len(store.accounts)}", FG),
+        (f"   transcripts .... {len(store.files)}", FG),
+        (f"   sesiones ....... {len(store.sessions)} · {len(live)} enlazadas", FG),
+        (f"   eventos ........ {len(store.log)}", FG),
+        ("   ENLACE ESTABLECIDO", f"bold {TOOL}"),
+    ]
+    console.print()
+    for text, style in steps:
+        for n in range(0, len(text) + 1, 6):
+            console.print(Text(text[:n], style=style), end="\r")
+            time.sleep(0.012)
+        console.print(Text(text, style=style))
+        time.sleep(0.09)
+    time.sleep(0.25)
+
+
 def split_keys(raw):
     """Separa lo leído en teclas sueltas: al mantener una tecla llegan varias juntas."""
     return re.findall(rb"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|[\x00-\xff]", raw, re.S)
@@ -2089,6 +2297,7 @@ def run(accounts, once, cfg):
     store.ready = True
     ui = new_ui()
     ui["layout"], ui["theme"], ui["alerts"] = cfg["layout"], cfg["theme"], cfg["alerts"]
+    ui["effects"] = cfg["effects"]
     apply_theme(ui["theme"])
     if once or not sys.stdout.isatty():
         console.print(render(console, store, None, account, time.time(), ui)[0])
@@ -2102,6 +2311,8 @@ def run(accounts, once, cfg):
     try:
         if fd is not None:
             tty.setcbreak(fd)
+        if ui["effects"]:
+            boot(console, store)
         with Live(console=console, screen=True, auto_refresh=False) as live:
             while True:
                 now = time.time()
@@ -2109,20 +2320,55 @@ def run(accounts, once, cfg):
                 root, sessions, focus = render(console, store, focus_sid, account, now, ui)
                 for sid, text in watch(store, sessions, seen, now):
                     notify(store, ui, sid, text, now)
+                if focus is not None:
+                    store.git_info(focus, now, refresh=True)
                 if not queue:
                     live.update(root, refresh=True)
                     queue.extend(split_keys(read_keys(fd, 0.12)))
                 if not queue:
                     continue
                 keys = queue.popleft()
+                if ui["typing"] is not None:
+                    # escribiendo una búsqueda: todas las teclas son texto
+                    if keys in (b"\r", b"\n"):
+                        ui["find"], ui["typing"] = query(ui), None
+                    elif keys == b"\x1b":
+                        ui["find"], ui["typing"] = "", None
+                    elif keys in (b"\x7f", b"\x08"):
+                        ui["typing"] = query(ui)[:-1].encode()
+                    elif keys == b"\x03":
+                        break
+                    elif len(keys) == 1 and keys[0] >= 0x20:
+                        ui["typing"] += keys
+                    if ui["log"] is not None:
+                        ui["log"]["cur"], ui["log"]["scroll"] = None, 0
+                    continue
                 if keys in (b"q", b"\x03"):
                     break
+                if keys == b"/":
+                    ui["typing"] = ui["find"].encode()
+                    continue
+                if keys == b"y":
+                    text = shown_text(store, focus, ui, now)
+                    if text:
+                        copy_text(text)
+                    ui["flash"] = (f"copiado ({len(text)} caracteres)" if text
+                                   else "nada que copiar: abre una entrada del log (s) o un subagente", now + 3)
+                    continue
+                if keys == b"E":
+                    ui["effects"] = cfg["effects"] = not ui["effects"]
+                    ui["flash"] = ("efectos activados" if ui["effects"] else "efectos apagados", now + 2)
+                    try:
+                        save_config(cfg)
+                    except OSError:
+                        pass
+                    continue
                 lg = ui["log"]
                 if lg is not None:
                     # cursor en el log: la lista (j/k elige entrada) y su detalle (j/k desplaza)
                     chosen = next((v for v in store.visible(focus, now, ui["all"], ui["sel"])
                                    if v["id"] == ui["sel"]), None)
-                    events = log_events(store, focus, account, chosen, ui["only"])[0]
+                    events = log_events(store, focus, account, chosen, ui["only"], query(ui))[0]
                     at = log_cursor(events, lg)
                     page = max(1, lg["rows"] - 2)
                     inside = lg["pane"] == "out"
