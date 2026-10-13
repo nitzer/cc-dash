@@ -45,7 +45,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -123,7 +123,9 @@ FRESH = 4            # segundos que dura el efecto de una tarea recién terminad
 # tipo de novedad -> (icono, título, papel de color, ruidosa: pitido + mensaje de tmux + log)
 NEWS = {"wait": ("◆", "te espera", "WAIT", True), "stuck": ("⚠", "posible atasco", "ERR", True),
         "fail": ("✗", "falló una tarea", "ERR", True), "job": ("✓", "comando terminado", "SWARM", False), "done": ("■", "turno terminado", "TOOL", True),
+        "cheat": ("★", "truco activado", "WAIT", False),
         "task": ("✓", "tarea terminada", "TOOL", False), "agent": ("✓", "subagente terminado", "SWARM", False)}
+CHEATS = ("iddqd", "idkfa")   # sí, esos
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -1597,7 +1599,9 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
             cv.put(x + len(trunc(text, max(0, w - x - len(tail)))), row + 1, tail, DIM)
         if not shown:
             cv.put(2, y + 2, empty, DIM)
-    if idle_rain and not agents:
+    if idle_rain == "force":
+        rain(cv, y, now)
+    elif idle_rain and not agents:
         rain(cv, y + 4, now)
     return cv.text()
 
@@ -1634,12 +1638,14 @@ def rain(cv, top, now):
                 cv.put(x, top + y, glyph, f"bold {FG}" if k == 0 else blend(TOOL, LINE, k / tail))
 
 
-def header(store, sessions, account, now, glitch=False):
+def header(store, sessions, account, now, glitch=False, god=False):
     busy = sum(1 for s in sessions if store.state(s) == "busy")
     open_ = sum(1 for s in sessions if store.state(s) != "ended")
     title = Text(justify="center")
     sep = "  //  " if HUD else "  ·  "
     title.append("▚▚ CLAUDE CODE" if HUD else "CLAUDE CODE", style=f"bold {LEAD}" if HUD else "bold")
+    if god:
+        title.append("  ★ GOD MODE ★", style=f"bold {breath(WAIT, now * 2)}")
     if store.multi:
         title.append(sep, style=DIM)
         title.append(f"CUENTA {account.upper()}" if account else f"{len(store.active)} CUENTAS",
@@ -2557,6 +2563,8 @@ def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
+            "cheat": "", "cheat_at": 0.0, "cheat_undo": None,   # lo tecleado hacia un truco
+            "god": False, "rain_until": 0.0,
             "help": None,                 # ventana de teclas abierta: {"top": fila, "rows": n}
             "settings": None,             # ventana de configuración abierta: {"at": fila}
             "cfg": None,                  # la configuración cargada, para dibujar esa ventana
@@ -2609,7 +2617,8 @@ def render(console, store, focus_sid, account, now, ui=None):
 
     root = Layout()
     root.split_column(
-        Layout(header(store, sessions, account, now, glitch=now < ui["glitch"]), name="head", size=3),
+        Layout(header(store, sessions, account, now, glitch=now < ui["glitch"], god=ui["god"]),
+               name="head", size=3),
         Layout(name="mid", size=dh + 2),
         bottom,
         Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"]),
@@ -2628,7 +2637,9 @@ def render(console, store, focus_sid, account, now, ui=None):
         else:
             resting = (ui["effects"] and focus is not None and store.state(focus) in ("idle", "ended")
                        and now - focus.last > 60)
-            body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"], idle_rain=resting)
+            storm = now < ui["rain_until"]   # idkfa: llueve aunque haya trabajo
+            body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"],
+                         idle_rain="force" if storm else resting)
         diag = Panel(body, box=PANEL_BOX, border_style=LINE,
                      title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left",
                      subtitle=f"diseño: {ui['layout']} · d cambia", subtitle_align="right")
@@ -2938,6 +2949,35 @@ def run(accounts, once, cfg):
                         if focus_sid and getattr(store.sessions.get(focus_sid), "account", None) in store.off:
                             focus_sid = None
                     continue
+                if len(keys) == 1 and keys.isalpha():
+                    # trucos: las letras también son atajos, así que al completarse uno
+                    # se deshace lo que hicieron por el camino
+                    if now - ui["cheat_at"] > 2:
+                        ui["cheat"] = ""
+                    ui["cheat_at"] = now
+                    typed = ui["cheat"] + keys.decode()
+                    ui["cheat"] = typed if any(c.startswith(typed) for c in CHEATS) else "i" if keys == b"i" else ""
+                    if ui["cheat"] == "i":
+                        ui["cheat_undo"] = (ui["layout"], ui["info"], ui["only"], focus_sid, ui["sel"])
+                    if ui["cheat"] in CHEATS:
+                        ui["layout"], ui["info"], ui["only"], focus_sid, ui["sel"] = ui["cheat_undo"]
+                        cfg["layout"] = ui["layout"]
+                        try:
+                            save_config(cfg)
+                        except OSError:
+                            pass
+                        if ui["cheat"] == "iddqd":
+                            ui["god"] = not ui["god"]
+                            text = ("invulnerabilidad activada · los subagentes aún pueden fallar" if ui["god"]
+                                    else "god mode desactivado · vuelves a ser mortal")
+                        else:
+                            ui["rain_until"] = now + 20
+                            text = "todas las llaves, armas y munición · tormenta de 20 segundos"
+                        ui["toasts"].append({"born": now, "kind": "cheat", "who": ui["cheat"].upper(), "text": text})
+                        ui["glitch"], ui["cheat"] = now + 1.2, ""
+                        continue
+                    if ui["cheat"] == "iddq":   # esta q es del truco, no un "salir"
+                        continue
                 if keys in (b"q", b"\x03"):
                     break
                 if keys == b",":
