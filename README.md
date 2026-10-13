@@ -51,18 +51,18 @@ Teclas:
 - `AvPág`/`RePág` (o espacio/`b`): desplaza el detalle
 - `f`: limita el log a la sesión enfocada; con un subagente seleccionado el
   log muestra solo lo de ese subagente
-- `s`: muestra la conversación de la sesión enfocada (prompts, respuestas y
-  herramientas con el inicio de su resultado) en lugar del diagrama, y sigue
-  en vivo. Se navega al estilo vim:
-  - `j`/`k`: mueve el cursor entre sesiones; la conversación cambia con él
-  - `l` (o `→`, `Enter`): entra a la conversación; ahí `j`/`k` la desplazan
-  - `h` (o `←`): vuelve a la lista de sesiones
-  - `AvPág`/`RePág` desplazan siempre · `g` inicio · `G`/`Fin` vuelve al final
-  - `s` o `Esc`: cierra
-
-  Mientras está abierta, bajo la lista aparece una tarjeta de color con
-  todos los datos de la sesión del cursor (cuenta, carpeta, modelo, contexto,
-  tokens, turnos, subagentes, proceso…).
+- `s`: pone el cursor en el session log. El panel de la derecha pasa a ser un
+  recuadro de color con el detalle completo de la entrada elegida: los
+  parámetros de la herramienta y su salida, el prompt entero, o el prompt y
+  la respuesta de un subagente. Se navega al estilo vim:
+  - `j`/`k`: recorre las entradas del log · `g` primera · `G` última (y sigue
+    a las nuevas)
+  - `l` (o `→`, `Enter`): entra al detalle; ahí `j`/`k` lo desplazan
+  - `h` (o `←`): vuelve al log
+  - `AvPág`/`RePág` desplazan el detalle siempre · `s` o `Esc` cierra
+- `v`: muestra la conversación de la sesión enfocada en lugar del diagrama,
+  con las mismas teclas (`j`/`k` cambia de sesión, `l` entra, `h` vuelve) y
+  una tarjeta con los datos de la sesión bajo la lista
 - `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o

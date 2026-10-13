@@ -11,10 +11,12 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         t muestra/oculta los subagentes ya terminados
         f limita el log a la sesión enfocada (con un subagente seleccionado,
           el log muestra solo lo de ese subagente)
-        s muestra la conversación de la sesión enfocada en lugar del diagrama:
-          j/k mueve el cursor entre sesiones, l entra a la conversación
-          (j/k la desplazan), h vuelve a la lista, AvPág/RePág desplazan
-          siempre, G/Fin vuelve a seguir en vivo, s cierra
+        s pone el cursor en el session log: j/k recorre las entradas y el
+          panel de la derecha muestra el detalle completo de cada una
+          (entrada y salida); l entra al detalle (j/k lo desplazan), h vuelve
+          al log, AvPág/RePág desplazan el detalle, G vuelve a la última, s cierra
+        v muestra la conversación de la sesión enfocada en lugar del diagrama
+          (mismas teclas: j/k sesión, l entra, h vuelve)
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
@@ -30,7 +32,7 @@ import sys
 import textwrap
 import time
 import tomllib
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime
 
 from rich import box
@@ -49,7 +51,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -120,6 +122,17 @@ def short_model(m):
 def short_tool(name):
     """mcp__servidor__herramienta -> herramienta"""
     return name.split("__")[-1] if name.startswith("mcp__") else name
+
+
+def clip(text, limit):
+    return text if len(text) <= limit else text[:limit] + "\n… (recortado)"
+
+
+def clip_input(inp):
+    """Parámetros de una herramienta como texto, acotados para no guardar archivos enteros."""
+    if not isinstance(inp, dict):
+        return {}
+    return {k: clip(v if isinstance(v, str) else json.dumps(v, ensure_ascii=False), 3000) for k, v in inp.items()}
 
 
 def block_text(content):
@@ -405,7 +418,7 @@ class Store:
                 grew |= self.tail(path, account)
             if grew:
                 self.log.sort(key=lambda e: e[0])
-                del self.log[:-400]
+                del self.log[:-1000]
 
     def read_meta(self, path):
         """agent-<id>.meta.json enlaza el transcript del subagente con su lanzamiento."""
@@ -473,9 +486,21 @@ class Store:
                 live[sid] = info
         self.live = live
 
-    def event(self, ts, sid, style, tag, text, agent=None):
-        """`agent`: id del lanzamiento o agentId del subagente al que pertenece el evento."""
-        self.log.append((ts, sid, style, tag, text, agent))
+    def event(self, ts, sid, style, tag, text, agent=None, ref=None):
+        """`agent`: id del lanzamiento o agentId del subagente al que pertenece el evento.
+        `ref`: de dónde sacar el detalle (un item de la conversación o {"k": "agent", "id": …})."""
+        self.log.append((ts, sid, style, tag, text, agent, ref))
+
+    def attach(self, s, b):
+        """Guarda el resultado de una herramienta en el item que la lanzó."""
+        item = s.open_items.pop(b.get("tool_use_id"), None)
+        if item is not None:
+            text = block_text(b.get("content"))
+            out = [ln for ln in text.splitlines() if ln.strip()]
+            item["res"], item["more"], item["err"] = out[:4], max(0, len(out) - 4), bool(b.get("is_error"))
+            item["out"] = clip(text, 6000)
+            s.rev += 1
+        return item
 
     def count_tool(self, s, name, inp):
         s.tools += 1
@@ -533,6 +558,10 @@ class Store:
         if side and o.get("agentId"):
             if kind == "assistant":
                 self.ingest_side(s, o["agentId"], o, msg, content, ts)
+            elif kind == "user":
+                for b in content if isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        self.attach(s, b)
             return
 
         if kind == "ai-title":
@@ -576,8 +605,11 @@ class Store:
                     label = tool_label(name, inp)
                     if not side:
                         shown = f"{inp.get('subagent_type') or 'general'}: {label}" if name in AGENT_TOOLS else label
-                        s.open_items[b.get("id")] = s.add_item(
-                            {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None, "err": False})
+                        item = s.open_items[b.get("id")] = s.add_item(
+                            {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None,
+                             "more": 0, "err": False, "out": None, "input": clip_input(inp)})
+                    else:
+                        item = None
                     if name in AGENT_TOOLS and not side:
                         s.agents.append({
                             "id": b.get("id"), "aid": None, "start": ts, "end": None,
@@ -587,11 +619,12 @@ class Store:
                             "model": inp.get("model") or "",
                             "result": "", "status": "",
                         })
-                        self.event(ts, sid, SWARM, "Agent", f"▶ {label}", b.get("id"))
+                        self.event(ts, sid, SWARM, "Agent", f"▶ {label}", b.get("id"),
+                                   {"k": "agent", "id": b.get("id")})
                     else:
                         s.pending[b.get("id")] = (short_tool(name), label, ts)
                         self.event(ts, sid, DIM if side else TOOL,
-                                   ("↳ " if side else "") + short_tool(name), label)
+                                   ("↳ " if side else "") + short_tool(name), label, ref=item)
                 elif "advisor" in name.lower() or "advisor" in str(b.get("type")):
                     if b.get("type", "").endswith("tool_use"):
                         s.advisor_calls += 1
@@ -601,24 +634,20 @@ class Store:
             if isinstance(content, str):
                 if not side and not o.get("isMeta") and not content.lstrip().startswith("<"):
                     s.pending.clear()
-                    s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
-                    self.event(ts, sid, LEAD, "prompt", "› " + content)
+                    item = s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
+                    self.event(ts, sid, LEAD, "prompt", "› " + content, ref=item)
                 return
             result = o.get("toolUseResult") if isinstance(o.get("toolUseResult"), dict) else {}
             for b in content if isinstance(content, list) else []:
                 if not isinstance(b, dict) or b.get("type") != "tool_result":
                     continue
                 tid = b.get("tool_use_id")
-                item = s.open_items.pop(tid, None)
-                if item is not None:
-                    out = [ln for ln in block_text(b.get("content")).splitlines() if ln.strip()]
-                    item["res"], item["more"], item["err"] = out[:4], max(0, len(out) - 4), bool(b.get("is_error"))
-                    s.rev += 1
+                item = self.attach(s, b)
                 if b.get("is_error"):
                     s.errors += 1
                 done = s.pending.pop(tid, None)
                 if done and b.get("is_error"):
-                    self.event(ts, sid, ERR, done[0], "✗ " + (done[1] or "error"))
+                    self.event(ts, sid, ERR, done[0], "✗ " + (done[1] or "error"), ref=item)
                 for a in s.agents:
                     if a["id"] != tid:
                         continue
@@ -654,8 +683,11 @@ class Store:
                 info["tool"] = (short_tool(name), tool_label(name, inp))
                 info["done"] = None
                 self.count_tool(s, name, inp)
+                item = s.open_items[b.get("id")] = {
+                    "k": "tool", "ts": ts, "name": info["tool"][0], "label": info["tool"][1], "res": None,
+                    "more": 0, "err": False, "out": None, "input": clip_input(inp)}
                 self.event(ts, s.sid, DIM, "↳ " + (self.agent_type.get(aid) or "agente"),
-                           f"{info['tool'][0]}: {info['tool'][1]}", aid)
+                           f"{info['tool'][0]}: {info['tool'][1]}", aid, item)
 
     def task_done(self, s, text, ts):
         task = re.search(r"<task-id>([^<]+)</task-id>", text)
@@ -671,7 +703,8 @@ class Store:
         a["status"] = status
         ok = status == "completed"
         self.event(ts, s.sid, SWARM if ok else ERR, "Agent",
-                   f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})", a["id"])
+                   f"{'✓' if ok else '✗'} {a['desc']} ({clock(a['end'] - a['start'])})", a["id"],
+                   {"k": "agent", "id": a["id"]})
 
     # -- vistas --
     def state(self, s):
@@ -1045,36 +1078,137 @@ def session_card(store, s, now):
     return panel, len(rows) + 4
 
 
-def log_panel(store, focus, account, rows, width, now, agent=None, only_focus=False):
-    """Log general; con `agent` solo lo de ese subagente, con `only_focus` solo la sesión enfocada."""
-    body = Text(no_wrap=True, overflow="ellipsis")
+def log_events(store, focus, account, agent=None, only_focus=False):
+    """(eventos, título, filtrado): el log general, el de un subagente o el de la sesión enfocada."""
     title = "session log"
     if agent is not None:
         own = {agent["id"], agent["aid"]} - {None}
-        events = [e for e in store.log if e[5] in own]
-        title += f" · solo {agent['type']}: {agent['desc']}"
-    elif only_focus and focus is not None:
-        events = [e for e in store.log if e[1] == focus.sid]
-        title += f" · solo {store.label(focus)} · f para ver todo"
-    else:
-        events = [e for e in store.log if account in (None, getattr(store.sessions.get(e[1]), "account", None))]
-    narrowed = agent is not None or (only_focus and focus is not None)
+        return [e for e in store.log if e[5] in own], f"{title} · solo {agent['type']}: {agent['desc']}", True
+    if only_focus and focus is not None:
+        return ([e for e in store.log if e[1] == focus.sid],
+                f"{title} · solo {store.label(focus)} · f para ver todo", True)
+    return ([e for e in store.log if account in (None, getattr(store.sessions.get(e[1]), "account", None))],
+            title, False)
+
+
+def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, border=LINE):
+    """`cursor`: índice de la entrada elegida cuando el log tiene el foco (tecla s)."""
+    body = Text(no_wrap=True, overflow="ellipsis")
     col = 0 if narrowed else 22 if store.multi else 14
-    events = events[-rows:] if rows > 0 else []
-    for i, (ts, sid, style, tag, text, _) in enumerate(events):
+    gutter = 2 if cursor is not None else 0
+    first = max(0, len(events) - rows) if cursor is None else max(0, min(cursor - rows // 2, len(events) - rows))
+    chunk = events[first: first + rows]
+    for i, e in enumerate(chunk):
+        ts, sid, style, tag, text = e[:5]
         s = store.sessions.get(sid)
-        body.append(time.strftime("%H:%M:%S", time.localtime(ts)) + " ", style=DIM)
+        picked = cursor is not None and first + i == cursor
+        line = Text(no_wrap=True)
+        if gutter:
+            line.append("▸ " if picked else "  ", style=f"bold {LEAD}")
+        line.append(time.strftime("%H:%M:%S", time.localtime(ts)) + " ", style=DIM)
         if col:
             name = trunc(store.label(s), col) if s else sid[:8]
-            body.append(f"{name:<{col}} ", style=FG if s is focus else DIM)
-        body.append(f"{trunc(tag, 10):<10} ", style=style)
-        body.append(trunc(text, max(10, width - 25 - col)), style=FG if s is focus else DIM)
-        if i < len(events) - 1:
+            line.append(f"{name:<{col}} ", style=FG if s is focus else DIM)
+        line.append(f"{trunc(tag, 10):<10} ", style=style)
+        line.append(trunc(text, max(10, width - 25 - col - gutter)), style=FG if s is focus or picked else DIM)
+        if picked:
+            line.pad_right(max(0, width - 4 - len(line.plain)))
+            line.stylize(f"bold on {CARD_BG}")
+        body.append_text(line)
+        if i < len(chunk) - 1:
             body.append("\n")
     if not events:
         body.append("sin eventos todavía", style=DIM)
     return Panel(body, title=trunc(title, max(10, width - 6)), title_align="left", box=box.SQUARE,
-                 border_style=SWARM if agent is not None else LINE)
+                 border_style=border)
+
+
+def event_panel(store, e, view, rows, width, now):
+    """Recuadro de color con el detalle completo de la entrada del log bajo el cursor."""
+    inside = view["pane"] == "out"
+    frame = dict(box=box.HEAVY, border_style=LEAD if inside else SWARM, style=f"on {CARD_BG}",
+                 title_align="left", subtitle_align="right")
+    if e is None:
+        return Panel(Text("el log está vacío", style=DIM), title="detalle", **frame)
+    ts, sid, style, tag, text, _, ref = e
+    s = store.sessions.get(sid)
+    inner = max(20, width - 4)
+    lines = []
+
+    def section(name):
+        if lines:
+            lines.append(("", ""))
+        lines.append((name.upper(), f"bold {SWARM}"))
+
+    # `lines` empieza vacía: la primera sección o línea no lleva separación
+
+    def add(body, st=FG):
+        for raw in (body or "").expandtabs(4).splitlines() or [""]:
+            for n, part in enumerate(textwrap.wrap(raw, inner - 2, replace_whitespace=False,
+                                                   drop_whitespace=False) or [""]):
+                lines.append(("  " + (part.lstrip() if n else part), st))
+
+    kind = ref["k"] if ref else None
+    status, sst = "", DIM
+    if kind == "prompt":
+        section("prompt")
+        add(ref["text"])
+    elif kind == "tool":
+        if ref["err"]:
+            status, sst = "✗ error", ERR
+        elif ref["out"] is not None:
+            status, sst = "✓ terminado", TOOL
+        else:
+            status, sst = "en curso", SWARM
+        if ref["label"]:
+            add(ref["label"], "bold")
+        section("salida")
+        if ref["out"] is None:
+            add("todavía sin resultado" if s and store.state(s) == "busy" else "sin resultado registrado", DIM)
+        else:
+            add(ref["out"].strip() or "(sin salida)", ERR if ref["err"] else FG)
+        section("entrada")
+        for key, value in ref["input"].items():
+            lines.append((f"  {key}", DIM))
+            add(value)
+    elif kind == "agent":
+        v = next((v for v in store.agents(s) if v["id"] == ref["id"]), None) if s else None
+        if v:
+            failed = bool(v["end"]) and v["status"] != "completed"
+            status, sst = ("en marcha", SWARM) if v["running"] else ("✗ " + v["status"], ERR) if failed else \
+                          ("✓ terminado", TOOL) if v["end"] else ("interrumpido", DIM)
+            section(f"subagente {v['type']}" + (f" · {v['model']}" if v["model"] else ""))
+            add(v["desc"])
+            section("prompt")
+            add(v["prompt"] or "(prompt vacío)")
+            section("respuesta")
+            add(v["response"] or ("todavía sin respuesta" if v["running"] else "(sin respuesta registrada)"),
+                FG if v["response"] else DIM)
+    else:
+        add(text)
+
+    head = Text(no_wrap=True, overflow="ellipsis")
+    head.append(time.strftime("%H:%M:%S", time.localtime(ts)), style="bold")
+    head.append(f" · {store.label(s) if s else sid[:8]}", style=FG)
+    if status:
+        head.append(f" · {status}", style=f"bold {sst}")
+    body_rows = max(1, rows - 2)
+    view["rows"] = body_rows
+    top = max(0, min(view["scroll"], len(lines) - body_rows))
+    view["scroll"] = top
+    body = Text(no_wrap=True, overflow="ellipsis")
+    chunk = lines[top: top + body_rows]
+    for n, (line, st) in enumerate(chunk):
+        body.append(line + ("\n" if n < len(chunk) - 1 else ""), style=st or None)
+    more = len(lines) - top - body_rows
+    pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
+    return Panel(Group(head, Text(""), body), title=trunc(f"detalle · {tag}", max(10, width - 6)),
+                 subtitle=pos if len(lines) > body_rows else None, **frame)
+
+
+def log_cursor(events, lg):
+    """Índice de la entrada elegida; sin elección fija (None) sigue a la última."""
+    return next((i for i, e in enumerate(events) if e is lg["cur"]), len(events) - 1)
 
 
 def stats_panel(store, s, now):
@@ -1269,14 +1403,27 @@ def footer(store, s, auto, account, now, sel=False, hint=None):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "s conversación · ←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "s log · v conversación · ←→ subagentes · t terminados · f filtra log · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
+def mode_hint(ui):
+    if ui["log"] is not None:
+        if ui["log"]["pane"] == "out":
+            return "jk desplaza el detalle · h vuelve al log · AvPág/RePág · s cierra · q salir"
+        return "jk entrada · l entra al detalle · AvPág/RePág · g primera · G última · s cierra · q salir"
+    if ui["session"] is not None:
+        if ui["session"]["pane"] == "out":
+            return "jk desplaza · h vuelve a sesiones · AvPág/RePág · G en vivo · v cierra · q salir"
+        return "jk sesión · l entra a la conversación · AvPág/RePág · v cierra · q salir"
+    return None
+
+
 def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
-            "session": None}  # con la conversación abierta: {"top", "rows", "last", "pane": "list" | "out"}
+            "session": None,  # conversación abierta (v): {"top", "rows", "last", "pane": "list" | "out"}
+            "log": None}      # cursor en el log (s): {"cur": evento | None, "scroll", "rows", "pane"}
 
 
 def render(console, store, focus_sid, account, now, ui=None):
@@ -1295,11 +1442,22 @@ def render(console, store, focus_sid, account, now, ui=None):
 
     detail = detail_panel(store, focus, ui, rows, detail_w, now)
     chosen = next((v for v in store.visible(focus, now, ui["all"], ui["sel"]) if v["id"] == ui["sel"]), None)
-    log = log_panel(store, focus, account, rows, width - detail_w if split else width, now,
-                    agent=chosen, only_focus=ui["only"])
+    events, title, narrowed = log_events(store, focus, account, chosen, ui["only"])
+    lg = ui["log"]
+    log_w = width - detail_w if split else width
+    if lg is not None:
+        at = log_cursor(events, lg)
+        detail = event_panel(store, events[at] if events else None, lg, rows, detail_w, now)
+        log = log_panel(store, focus, events, title, narrowed, rows, log_w, cursor=at,
+                        border=LEAD if lg["pane"] == "list" else LINE)
+    else:
+        log = log_panel(store, focus, events, title, narrowed, rows, log_w,
+                        border=SWARM if chosen is not None else LINE)
     bottom = Layout(name="bottom")
     if split:
         bottom.split_row(Layout(log), Layout(detail, size=detail_w))
+    elif lg is not None:
+        bottom.update(detail if lg["pane"] == "out" else log)
     else:
         bottom.update(detail if ui["sel"] or ui["info"] else log)
 
@@ -1309,10 +1467,7 @@ def render(console, store, focus_sid, account, now, ui=None):
         Layout(name="mid", size=dh + 2),
         bottom,
         Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"]),
-                      hint=None if ui["session"] is None else
-                      "jk desplaza · h vuelve a sesiones · AvPág/RePág · G en vivo · s cierra · q salir"
-                      if ui["session"]["pane"] == "out" else
-                      "jk sesión · l entra a la conversación · AvPág/RePág · s cierra · q salir"),
+                      hint=mode_hint(ui)),
                name="foot", size=1),
     )
     if ui["session"] is not None:
@@ -1358,6 +1513,11 @@ def read_keys(fd, timeout):
     return os.read(fd, 64) if ready else b""
 
 
+def split_keys(raw):
+    """Separa lo leído en teclas sueltas: al mantener una tecla llegan varias juntas."""
+    return re.findall(rb"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|[\x00-\xff]", raw, re.S)
+
+
 def run(accounts, once):
     console = Console()
     store = Store(accounts)
@@ -1371,6 +1531,7 @@ def run(accounts, once):
     saved = termios.tcgetattr(fd) if fd is not None else None
     focus_sid = None
     ui = new_ui()
+    queue = deque()  # teclas leídas y aún sin procesar
     try:
         if fd is not None:
             tty.setcbreak(fd)
@@ -1379,12 +1540,60 @@ def run(accounts, once):
                 now = time.time()
                 store.poll(now)
                 root, sessions, focus = render(console, store, focus_sid, account, now, ui)
-                live.update(root, refresh=True)
-                keys = read_keys(fd, 0.12)
-                if not keys:
+                if not queue:
+                    live.update(root, refresh=True)
+                    queue.extend(split_keys(read_keys(fd, 0.12)))
+                if not queue:
                     continue
+                keys = queue.popleft()
                 if keys in (b"q", b"\x03"):
                     break
+                lg = ui["log"]
+                if lg is not None:
+                    # cursor en el log: la lista (j/k elige entrada) y su detalle (j/k desplaza)
+                    chosen = next((v for v in store.visible(focus, now, ui["all"], ui["sel"])
+                                   if v["id"] == ui["sel"]), None)
+                    events = log_events(store, focus, account, chosen, ui["only"])[0]
+                    at = log_cursor(events, lg)
+                    page = max(1, lg["rows"] - 2)
+                    inside = lg["pane"] == "out"
+                    move = None
+                    handled = True
+                    if keys in (b"s", b"S", b"\x1b"):
+                        ui["log"] = None
+                    elif keys in (b"h", b"\x1b[D"):
+                        lg["pane"] = "list"
+                    elif keys in (b"l", b"\x1b[C", b"\r", b"\n"):
+                        lg["pane"] = "out"
+                    elif inside and keys in (b"k", b"\x1b[A"):
+                        lg["scroll"] = max(0, lg["scroll"] - 1)
+                    elif inside and keys in (b"j", b"\x1b[B"):
+                        lg["scroll"] += 1
+                    elif keys in (b"k", b"\x1b[A"):
+                        move = at - 1
+                    elif keys in (b"j", b"\x1b[B"):
+                        move = at + 1
+                    elif keys in (b"b", b"\x1b[5~"):
+                        lg["scroll"] = max(0, lg["scroll"] - page)
+                    elif keys in (b" ", b"\x1b[6~"):
+                        lg["scroll"] += page
+                    elif keys in (b"g", b"\x1b[H", b"\x1b[1~"):
+                        move = 0
+                    elif keys in (b"G", b"\x1b[F", b"\x1b[4~"):
+                        move = len(events)
+                    else:
+                        handled = False
+                    if move is not None and events:
+                        move = max(0, move)
+                        # en la última entrada el cursor queda libre y sigue a las nuevas
+                        lg["cur"] = None if move >= len(events) - 1 else events[move]
+                        lg["scroll"] = 0
+                    if handled:
+                        continue
+                elif keys in (b"s", b"S"):
+                    ui["log"] = {"cur": None, "scroll": 0, "rows": 1, "pane": "list"}
+                    ui["session"] = None
+                    continue
                 view = ui["session"]
                 if view is not None:
                     # dos focos al estilo vim: la lista (j/k elige sesión) y la conversación (j/k desplaza)
@@ -1392,7 +1601,7 @@ def run(accounts, once):
                     here = view["last"] if view["top"] is None else view["top"]
                     inside = view["pane"] == "out"
                     handled = True
-                    if keys in (b"s", b"S", b"\x1b"):
+                    if keys in (b"v", b"V", b"\x1b"):
                         ui["session"] = None
                     elif keys in (b"h", b"\x1b[D"):
                         view["pane"] = "list"
@@ -1414,9 +1623,10 @@ def run(accounts, once):
                         handled = False
                     if handled:
                         continue
-                elif keys in (b"s", b"S"):
+                elif keys in (b"v", b"V"):
                     if focus:
                         ui["session"] = {"top": None, "rows": 1, "last": 0, "pane": "list"}
+                        ui["log"] = None
                     continue
                 ids = [v["id"] for v in store.visible(focus, now, ui["all"], ui["sel"])]
                 page = max(1, ui["rows"] - 1)
