@@ -8,6 +8,7 @@ herramientas, subagentes, tokens). Solo lectura: no toca ni envía nada.
 Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto · q sale
         ←/→ selecciona un subagente · r su última respuesta · p su prompt
         AvPág/RePág desplaza el detalle · Esc deselecciona · i actividad
+        t muestra/oculta los subagentes ya terminados
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
@@ -42,7 +43,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -58,6 +59,7 @@ FG = "#c9d1e4"
 
 AGENT_TOOLS = ("Agent", "Task")
 MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
+LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -666,6 +668,13 @@ class Store:
         out.sort(key=lambda v: (not v["running"], -(v["start"] or 0)))
         return out
 
+    def visible(self, s, now, show_all=False, sel=None):
+        """Los subagentes que siguen en uso: en marcha, recién terminados o el seleccionado."""
+        if s is None:
+            return []
+        return [v for v in self.agents(s)
+                if show_all or v["running"] or v["id"] == sel or (v["end"] and now - v["end"] < LINGER)]
+
     def name(self, s):
         info = self.live.get(s.sid) or {}
         return info.get("name") or os.path.basename(s.cwd or "") or s.sid[:8]
@@ -771,7 +780,7 @@ def hpath(x0, x1, y):
     return [(x, y) for x in range(x0, x1 + step, step)]
 
 
-def diagram(store, s, w, compact, now, sel=None):
+def diagram(store, s, w, compact, now, sel=None, show_all=False):
     h = 15 if compact else 21
     cv = Canvas(w, h)
     if s is None:
@@ -818,7 +827,8 @@ def diagram(store, s, w, compact, now, sel=None):
         cv.put(lx + 2, 3, trunc(s.title or "—", inner), DIM)
 
     # subagentes
-    agents = store.agents(s)
+    everyone = store.agents(s)
+    agents = store.visible(s, now, show_all, sel)
     slots = max(MIN_SLOTS, min(len(agents), (w + 2) // (SLOT_WIDTH + 2)))
     idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
     first = max(0, idx - slots + 1) if idx is not None else 0
@@ -830,10 +840,18 @@ def diagram(store, s, w, compact, now, sel=None):
     btrunk = w // 2
     cv.put(trunk, 5, "│", LINE)
     cv.branch(6, xs, trunk, LINE, down=True)
+    notes, live = [], 0
     if len(agents) > slots:
         hidden = agents[:first] + agents[first + slots:]
         live = sum(1 for v in hidden if v["running"])
-        note = f"+{len(hidden)} más" + (f", {live} en marcha" if live else "") + " · ←→ para verlos"
+        notes.append(f"+{len(hidden)} más" + (f", {live} en marcha" if live else "") + " · ←→")
+    gone = len(everyone) - len(agents)
+    if gone:
+        notes.append(f"{gone} terminado{'s' if gone != 1 else ''} oculto{'s' if gone != 1 else ''} · t")
+    elif show_all and any(not v["running"] for v in everyone):
+        notes.append("t oculta terminados")
+    if notes:
+        note = trunc(" · ".join(notes), max(0, w - trunk - 2))
         cv.put(max(0, w - len(note)), 5, note, SWARM if live else DIM)
     if not compact:
         cv.branch(15, xs, btrunk, LINE, down=False)
@@ -890,7 +908,7 @@ def diagram(store, s, w, compact, now, sel=None):
         bw = min(56, w)
         bx = btrunk - bw // 2
         cv.box(bx, 17, bw, 4, lst)
-        done = sum(1 for v in agents if v["end"])
+        done = sum(1 for v in everyone if v["end"])
         cv.put(bx + 2, 18, trunc(f"de vuelta al lead · {done} subagente{'s' if done != 1 else ''} terminado{'s' if done != 1 else ''}", bw - 4), lst)
         stats = f"{s.turns} turnos · {s.tools} tools · out {ktok(s.out_tokens)} · ctx {ktok(s.ctx)}"
         if s.ctx:
@@ -1024,7 +1042,7 @@ def stats_panel(store, s, now):
 
 def detail_panel(store, s, ui, rows, width, now):
     """A la derecha del log: el subagente seleccionado, o la actividad de la sesión."""
-    agents = store.agents(s) if s else []
+    agents = store.visible(s, now, ui["all"], ui["sel"])
     i = next((n for n, v in enumerate(agents) if v["id"] == ui["sel"]), None)
     if i is None:
         ui["sel"] = None
@@ -1081,13 +1099,13 @@ def footer(store, s, auto, account, now, sel=False):
     if sel:
         keys = "←→ subagente · r respuesta · p prompt · AvPág/RePág · Esc soltar · q salir"
     else:
-        keys = "←→ subagentes · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
+        keys = "←→ subagentes · t terminados · ↑↓ sesión · " + ("c cuenta · " if store.multi else "") + "a auto · q salir"
     t.append(f"   {'auto' if auto else 'fija'} · {keys}", style=DIM)
     return t
 
 
 def new_ui():
-    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1}
+    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False}
 
 
 def render(console, store, focus_sid, account, now, ui=None):
@@ -1119,7 +1137,7 @@ def render(console, store, focus_sid, account, now, ui=None):
         bottom,
         Layout(footer(store, focus, focus_sid is None, account, now, sel=bool(ui["sel"])), name="foot", size=1),
     )
-    diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now, ui["sel"]),
+    diag = Panel(diagram(store, focus, max(40, width - side_w - 4), compact, now, ui["sel"], ui["all"]),
                  box=box.SQUARE, border_style=LINE,
                  title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left")
     if wide:
@@ -1178,7 +1196,7 @@ def run(accounts, once):
                     continue
                 if keys in (b"q", b"\x03"):
                     break
-                ids = [v["id"] for v in store.agents(focus)] if focus else []
+                ids = [v["id"] for v in store.visible(focus, now, ui["all"], ui["sel"])]
                 page = max(1, ui["rows"] - 1)
                 if keys in (b"l", b"h", b"\x1b[C", b"\x1b[D"):
                     order = [None] + ids
@@ -1196,6 +1214,8 @@ def run(accounts, once):
                     ui["scroll"] = 0
                 elif keys == b"i":
                     ui["info"] = not ui["info"]
+                elif keys == b"t":
+                    ui["all"] = not ui["all"]
                 elif keys in (b" ", b"\x1b[6~"):
                     ui["scroll"] += page
                 elif keys in (b"b", b"\x1b[5~"):

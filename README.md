@@ -46,6 +46,8 @@ Teclas:
 - `↑`/`↓` o `j`/`k`: cambia de sesión · `a`: vuelve al modo automático
 - `←`/`→`: selecciona un subagente · `Esc`: lo suelta
 - `r`: última respuesta del subagente · `p`: su prompt
+- `t`: muestra u oculta los subagentes ya terminados (se retiran solos del
+  diagrama un minuto después de acabar)
 - `AvPág`/`RePág` (o espacio/`b`): desplaza el detalle
 - `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
 
