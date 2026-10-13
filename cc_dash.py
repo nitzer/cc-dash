@@ -41,7 +41,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -314,6 +314,7 @@ class Session:
         self.cwd = ""
         self.branch = ""
         self.model = ""
+        self.model_id = ""      # id completo, p. ej. "claude-opus-5[1m]"
         self.advisor = ""
         self.effort = ""
         self.perm = ""
@@ -329,6 +330,8 @@ class Session:
         self.errors = 0
         self.tool_counts = Counter()
         self.skills = Counter()
+        self.edits = Counter()  # ruta -> ediciones (Edit/Write/NotebookEdit)
+        self.reads = set()
         self.mcp = Counter()
         self.hooks = Counter()
         self.advisor_calls = 0
@@ -338,6 +341,11 @@ class Session:
         self.agents = []    # lanzamientos vistos en el transcript principal
         self.side = {}      # agentId -> actividad leída del transcript del subagente
         self.requests = {}  # requestId -> tokens de salida ya contados
+
+    def window(self):
+        """Ventana de contexto. El transcript no la guarda: 1M si el modelo lo indica
+        (sufijo [1m]) o si el contexto ya supera 200k; si no, 200k."""
+        return 1_000_000 if "[1m]" in self.model_id or self.ctx > 200_000 else 200_000
 
     def side_info(self, aid):
         return self.side.setdefault(aid, {"tools": 0, "tool": None, "text": "", "final": "",
@@ -455,6 +463,11 @@ class Store:
             s.skills[inp["skill"]] += 1
         if name.startswith("mcp__"):
             s.mcp[name.split("__")[1]] += 1
+        path = inp.get("file_path") or inp.get("notebook_path") if isinstance(inp, dict) else None
+        if path and name in ("Edit", "Write", "NotebookEdit"):
+            s.edits[path] += 1
+        elif path and name == "Read":
+            s.reads.add(path)
 
     def add_usage(self, s, o, msg, side=None):
         usage = msg.get("usage") or {}
@@ -493,6 +506,8 @@ class Store:
             att = o.get("attachment") if isinstance(o.get("attachment"), dict) else {}
             if att.get("type") == "hook_success" and att.get("hookEvent"):
                 s.hooks[att["hookEvent"]] += 1
+            elif att.get("type") == "model" and not side and isinstance(att.get("identity"), dict):
+                s.model_id = att["identity"].get("modelId") or s.model_id
             return
         if side and o.get("agentId"):
             if kind == "assistant":
@@ -859,6 +874,8 @@ def diagram(store, s, w, compact, now, sel=None):
         done = sum(1 for v in agents if v["end"])
         cv.put(bx + 2, 18, trunc(f"de vuelta al lead · {done} subagente{'s' if done != 1 else ''} terminado{'s' if done != 1 else ''}", bw - 4), lst)
         stats = f"{s.turns} turnos · {s.tools} tools · out {ktok(s.out_tokens)} · ctx {ktok(s.ctx)}"
+        if s.ctx:
+            stats += f" ({min(100, round(100 * s.ctx / s.window()))}%)"
         if s.cost is not None:
             stats += f" · ${s.cost:.2f}"
         cv.put(bx + 2, 19, trunc(stats, bw - 4), DIM)
@@ -938,7 +955,14 @@ def stats_panel(store, s, now):
 
     row("modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
                                          s.perm and f"permisos {s.perm}") if x))
-    usage = [f"{ktok(s.ctx)} en contexto"]
+    if s.ctx:
+        pct = min(100, round(100 * s.ctx / s.window()))
+        fill = round(pct / 100 * 12)
+        t.append(f"{'contexto':<11}", style=DIM)
+        t.append("█" * fill, style=TOOL if pct < 60 else LEAD if pct < 85 else ERR)
+        t.append("░" * (12 - fill), style=LINE)
+        t.append(f" {pct}% · {ktok(s.ctx)} de {ktok(s.window())}\n", style=FG)
+    usage = []
     if s.cache_pct is not None:
         usage.append(f"caché {s.cache_pct}%")
     usage.append(f"salida {ktok(s.out_tokens)}")
@@ -952,6 +976,13 @@ def stats_panel(store, s, now):
     tools = counts(s.tool_counts) or "ninguna"
     row("tools", tools + (f" · {s.errors} con error" if s.errors else ""), TOOL if s.tool_counts else DIM)
     row("skills", counts(s.skills) or "ninguna", ADVISOR if s.skills else DIM)
+    if s.edits or s.reads:
+        names = Counter()
+        for path, n in s.edits.items():
+            names[os.path.basename(path)] += n
+        only_read = len(s.reads - set(s.edits))
+        files = counts(names, 4) if names else "ninguno editado"
+        row("archivos", files + (f" · {only_read} solo leído{'s' if only_read != 1 else ''}" if only_read else ""), LEAD if names else DIM)
     if s.mcp:
         row("mcp", counts(s.mcp))
     agents = store.agents(s)

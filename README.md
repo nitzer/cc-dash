@@ -50,9 +50,13 @@ Teclas:
 - `c`: filtra por cuenta · `i`: actividad (en terminales estrechas) · `q`: sale
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
-prompt) o, si no hay ninguno, la actividad de la sesión: tokens y caché,
-turnos, herramientas más usadas, errores, skills, servidores MCP, subagentes
-por tipo, hooks y líneas de código cambiadas.
+prompt) o, si no hay ninguno, la actividad de la sesión: porcentaje de la
+ventana de contexto, tokens y caché, turnos, herramientas más usadas, errores,
+skills, archivos editados y leídos, servidores MCP, subagentes por tipo, hooks
+y líneas de código cambiadas.
+
+La ventana de contexto no figura en los transcripts: se asume 1M si el modelo
+lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
 
 ## Cuentas
 
