@@ -214,6 +214,18 @@ cc-dash remove trabajo
 cc-dash config                          # ruta del archivo de configuración
 ```
 
+Una cuenta se puede deshabilitar sin quitarla: deja de leerse y sus sesiones
+desaparecen del dashboard hasta que la vuelvas a activar.
+
+```sh
+cc-dash disable trabajo
+cc-dash enable trabajo
+```
+
+Desde el dashboard, la ventana de configuración (`,`) tiene al final una
+sección **Cuentas** con un interruptor por cada una; el cambio se aplica al
+momento. `cc-dash accounts` muestra el estado de cada cuenta.
+
 El archivo es `~/.config/cc-dash/config.toml` y se puede editar a mano:
 
 ```toml

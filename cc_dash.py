@@ -30,6 +30,7 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
+        cc-dash disable CUENTA | enable CUENTA
         cc-dash set CLAVE VALOR     (umbrales y opciones; `cc-dash set` las lista)
 """
 import argparse
@@ -65,7 +66,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -286,7 +287,7 @@ def apply_limits(cfg):
 
 def load_config():
     cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista",
-           "theme": "clasico", "alerts": True, "effects": True, "toasts": True,
+           "theme": "clasico", "alerts": True, "effects": True, "toasts": True, "disabled": [],
            **{key: default for key, (_, default, _) in LIMITS.items()}}
     try:
         with open(config_path(), "rb") as fh:
@@ -297,6 +298,7 @@ def load_config():
         sys.exit(f"cc-dash: no se pudo leer {config_path()}: {exc}")
     cfg["account"] = [a for a in raw.get("account", []) if a.get("name") and a.get("path")]
     cfg["scan"] = [d for d in raw.get("scan", []) if isinstance(d, str)]
+    cfg["disabled"] = [n for n in raw.get("disabled", []) if isinstance(n, str)]
     cfg["include_default"] = bool(raw.get("include_default", True))
     cfg["auto_update"] = bool(raw.get("auto_update", True))
     cfg["layout"] = raw.get("layout") if raw.get("layout") in LAYOUTS else "lista"
@@ -334,6 +336,8 @@ def save_config(cfg):
         "# Umbrales. Se pueden cambiar aquí o con `cc-dash set CLAVE VALOR`; el dashboard los relee solo.",
         *[f"{key} = {cfg[key]}".ljust(22) + f"# {what}" for key, (_, _, what) in LIMITS.items()],
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
+        "# disabled: cuentas que no se muestran ni se leen (ventana de configuración, o enable/disable).",
+        "disabled = [" + ", ".join(json.dumps(n) for n in cfg["disabled"]) + "]",
     ]
     for a in cfg["account"]:
         out += ["", "[[account]]", f"name = {json.dumps(a['name'])}", f"path = {json.dumps(a['path'])}"]
@@ -547,7 +551,7 @@ class Session:
 class Store:
     def __init__(self, accounts):
         self.accounts = accounts
-        self.multi = len(accounts) > 1
+        self.off = set()    # nombres de las cuentas deshabilitadas: ni se leen ni se muestran
         self.sessions = {}
         self.log = []       # (ts, sid, style, tag, text)
         self.offsets = {}
@@ -563,10 +567,18 @@ class Store:
         self.meta_seen = set()
         self.t_glob = self.t_live = self.t_tail = 0.0
 
+    @property
+    def active(self):
+        return [a for a in self.accounts if a.name not in self.off]
+
+    @property
+    def multi(self):
+        return len(self.active) > 1
+
     # -- lectura incremental de transcripts --
     def poll(self, now):
         if now - self.t_glob > 3:
-            self.files = [(path, acct.name) for acct in self.accounts
+            self.files = [(path, acct.name) for acct in self.active
                           for path in glob.glob(os.path.join(acct.projects, "**", "*.jsonl"), recursive=True)]
             self.t_glob = now
             for path, _ in self.files:
@@ -630,7 +642,7 @@ class Store:
 
     def read_live(self):
         live = {}
-        for acct in self.accounts:
+        for acct in self.active:
             for path in glob.glob(os.path.join(acct.live_dir, "*.json")):
                 try:
                     with open(path) as fh:
@@ -1008,7 +1020,7 @@ class Store:
             if sid not in self.sessions:
                 s = self.sessions[sid] = Session(sid, info["_account"])
                 s.cwd = info.get("cwd") or ""
-        pool = [s for s in self.sessions.values() if account in (None, s.account)]
+        pool = [s for s in self.sessions.values() if account in (None, s.account) and s.account not in self.off]
         live = [s for s in pool if s.sid in self.live]
         live.sort(key=lambda s: (s.account, self.live[s.sid].get("startedAt") or 0))
         rest = [s for s in pool if s.sid not in self.live]
@@ -1638,7 +1650,7 @@ def header(store, sessions, account, now, glitch=False):
     title.append("▚▚ CLAUDE CODE" if HUD else "CLAUDE CODE", style=f"bold {LEAD}" if HUD else "bold")
     if store.multi:
         title.append(sep, style=DIM)
-        title.append(f"CUENTA {account.upper()}" if account else f"{len(store.accounts)} CUENTAS",
+        title.append(f"CUENTA {account.upper()}" if account else f"{len(store.active)} CUENTAS",
                      style=f"bold {ADVISOR}")
     title.append(sep, style=DIM)
     title.append(f"{open_} SESIÓN ABIERTA" if open_ == 1 else f"{open_} SESIONES ABIERTAS", style=f"bold {LEAD}")
@@ -1771,8 +1783,11 @@ def _log_events(store, focus, account, agent, only_focus):
     if only_focus and focus is not None:
         return ([e for e in store.log if e[1] == focus.sid],
                 f"{title} · solo {store.label(focus)} · f para ver todo", True)
-    return ([e for e in store.log if account in (None, getattr(store.sessions.get(e[1]), "account", None))],
-            title, False)
+    def wanted(e):
+        owner = getattr(store.sessions.get(e[1]), "account", None)
+        return owner not in store.off and account in (None, owner)
+
+    return [e for e in store.log if wanted(e)], title, False
 
 
 def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, border=LINE):
@@ -2224,30 +2239,61 @@ SETTINGS = [
     ("toast_seconds", "Duración de un toast", "int", 1, 8, "segundos que un toast sigue en pantalla"),
     ("toast_max", "Toasts a la vez", "int", 1, 4, "cuántos toasts caben apilados"),
 ]
-SETTING_ROWS = [item for item in SETTINGS if item is not None]
 
 
-def settings_panel(cfg, view, width):
+def setting_entries(store):
+    """Filas de la ventana: los ajustes fijos y, debajo, un interruptor por cuenta."""
+    rows = list(SETTINGS) + [None, "Cuentas"]
+    for a in store.accounts:
+        where = a.path.replace(HOME, "~")
+        rows.append((f"account:{a.name}", a.name, "account", None, True,
+                     f"{where} · al deshabilitarla no se lee ni se muestra"))
+    return rows
+
+
+def setting_value(cfg, item):
+    key = item[0]
+    return key.split(":", 1)[1] not in cfg["disabled"] if item[2] == "account" else cfg[key]
+
+
+
+def settings_panel(cfg, store, view, width, max_rows):
     """Ventana flotante de configuración: cada cambio se aplica y se guarda al momento."""
+    entries = setting_entries(store)
+    items = [e for e in entries if isinstance(e, tuple)]
+    view["at"] %= len(items)
+    chosen = items[view["at"]]
+    # si no caben todas las filas, la ventana se desplaza para no perder la elegida
+    room = max(5, max_rows - 6)
+    at = entries.index(chosen)
+    first = max(0, min(at - room // 2, len(entries) - room)) if len(entries) > room else 0
     body = Text(no_wrap=True, overflow="ellipsis")
-    chosen = SETTING_ROWS[view["at"]]
     name_w = 26
-    for item in SETTINGS:
+    for item in entries[first: first + room]:
         if item is None:
             body.append("\n")
             continue
+        if isinstance(item, str):
+            body.append(f" {item.upper()}\n", style=f"bold {SWARM}")
+            continue
         key, name, kind, _, default, _ = item
         picked = item is chosen
-        value = cfg[key]
-        shown = ("sí" if value else "no") if kind == "bool" else f"{value} s" if kind == "int" and key not in (
-            "stuck_errors", "stuck_repeat", "toast_max") else str(value)
-        if kind == "int" and value == 0 and key.startswith("stuck"):
+        value = setting_value(cfg, item)
+        if kind == "account":
+            shown = "activa" if value else "deshabilitada"
+        elif kind == "bool":
+            shown = "sí" if value else "no"
+        elif kind == "int" and value == 0 and key.startswith("stuck"):
             shown = "apagado"
+        elif kind == "int" and key not in ("stuck_errors", "stuck_repeat", "toast_max"):
+            shown = f"{value} s"
+        else:
+            shown = str(value)
         line = Text(no_wrap=True)
         line.append(" ▸ " if picked else "   ", style=f"bold {LEAD}")
-        line.append(f"{name:<{name_w}}", style="bold" if picked else FG)
+        line.append(f"{trunc(name, name_w - 1):<{name_w}}", style="bold" if picked else FG)
         line.append("◂ " if picked else "  ", style=LEAD)
-        color = (TOOL if value else ERR) if kind == "bool" else SWARM
+        color = (TOOL if value else ERR) if kind in ("bool", "account") else SWARM
         line.append(shown, style=f"bold {color}")
         line.append(" ▸" if picked else "", style=LEAD)
         if value != default:
@@ -2259,15 +2305,23 @@ def settings_panel(cfg, view, width):
         body.append("\n")
     body.append("\n " + trunc(chosen[5], width - 6) + "\n", style=DIM)
     body.append(" " + trunc("j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar", width - 6), style=DIM)
+    more = len(entries) > room
     return Panel(body, title=label("configuración", "CFG"), title_align="left", box=box.HEAVY,
                  border_style=f"bold {LEAD}", style=f"on {CARD_BG}", width=width,
-                 subtitle="se guarda al cambiar", subtitle_align="right")
+                 subtitle=f"fila {view['at'] + 1} de {len(items)} · se guarda al cambiar" if more
+                 else "se guarda al cambiar", subtitle_align="right")
 
 
 def change_setting(cfg, item, step):
     """Mueve un ajuste un paso (step=±1), o lo devuelve a su valor por defecto (step=0)."""
     key, _, kind, extra, default, _ = item
-    if step == 0:
+    if kind == "account":
+        name = key.split(":", 1)[1]
+        if name in cfg["disabled"]:
+            cfg["disabled"].remove(name)
+        elif step != 0:   # "por defecto" es activa
+            cfg["disabled"].append(name)
+    elif step == 0:
         cfg[key] = default
     elif kind == "bool":
         cfg[key] = not cfg[key]
@@ -2277,8 +2331,11 @@ def change_setting(cfg, item, step):
         cfg[key] = max(1 if key == "toast_max" else 0, cfg[key] + step * extra)
 
 
-def apply_config(cfg, ui):
+def apply_config(cfg, ui, store=None):
     """Lleva la configuración al dashboard en marcha y la guarda."""
+    if store is not None:
+        store.off = set(cfg["disabled"])
+        store.t_glob = store.t_live = 0.0   # que la próxima pasada relea archivos y sesiones
     ui["theme"], ui["layout"] = cfg["theme"], cfg["layout"]
     ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
     if not ui["toasts_on"]:
@@ -2435,7 +2492,8 @@ def render(console, store, focus_sid, account, now, ui=None):
     else:
         root["mid"].update(diag)
     ui["toasts"][:] = [t for t in ui["toasts"] if now - t["born"] < TOAST_LIFE]
-    modal = settings_panel(ui["cfg"], ui["settings"], min(66, width - 2)) if ui["settings"] is not None else None
+    modal = (settings_panel(ui["cfg"], store, ui["settings"], min(66, width - 2), height - 4)
+             if ui["settings"] is not None else None)
     if ui["toasts"] or modal is not None:
         tw = max(30, min(46, width // 2))
         root = Overlay(root, [toast_panel(t, tw, now) for t in ui["toasts"]], tw,
@@ -2577,7 +2635,7 @@ def boot(console, store):
     live = [s for s in store.sessions.values() if s.sid in store.live]
     steps = [
         (f"▚▚ CC-DASH v{__version__} // INIT", f"bold {LEAD}"),
-        (f"   cuentas ........ {len(store.accounts)}", FG),
+        (f"   cuentas ........ {len(store.active)}" + (f" (+{len(store.off)} deshabilitadas)" if store.off else ""), FG),
         (f"   transcripts .... {len(store.files)}", FG),
         (f"   sesiones ....... {len(store.sessions)} · {len(live)} enlazadas", FG),
         (f"   eventos ........ {len(store.log)}", FG),
@@ -2613,10 +2671,11 @@ def reload_limits(cfg, ui, seen, now):
         fresh = load_config()
     except SystemExit:   # archivo a medio escribir o con errores: se mantiene lo que había
         return
-    for key in (*LIMITS, "toasts", "alerts", "effects"):
+    for key in (*LIMITS, "toasts", "alerts", "effects", "disabled"):
         cfg[key] = fresh[key]
     ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
     apply_limits(cfg)
+    return True
 
 
 def split_keys(raw):
@@ -2627,6 +2686,7 @@ def split_keys(raw):
 def run(accounts, once, cfg):
     console = Console()
     store = Store(accounts)
+    store.off = set(cfg["disabled"])
     store.poll(time.time())
     account = None
     store.ready = True
@@ -2659,7 +2719,9 @@ def run(accounts, once, cfg):
                     notify(store, ui, sid, kind, text, now)
                 if focus is not None:
                     store.git_info(focus, now, refresh=True)
-                reload_limits(cfg, ui, cfg_seen, now)
+                if reload_limits(cfg, ui, cfg_seen, now) and store.off != set(cfg["disabled"]):
+                    store.off = set(cfg["disabled"])
+                    store.t_glob = store.t_live = 0.0
                 if not queue:
                     live.update(root, refresh=True)
                     queue.extend(split_keys(read_keys(fd, 0.12)))
@@ -2683,20 +2745,25 @@ def run(accounts, once, cfg):
                     continue
                 if ui["settings"] is not None:
                     # ventana de configuración: captura todas las teclas
-                    at = ui["settings"]["at"]
-                    item = SETTING_ROWS[at]
+                    rows = [e for e in setting_entries(store) if isinstance(e, tuple)]
+                    at = ui["settings"]["at"] % len(rows)
+                    item = rows[at]
                     if keys in (b",", b"\x1b", b"q"):
                         ui["settings"] = None
                     elif keys == b"\x03":
                         break
                     elif keys in (b"j", b"\x1b[B", b"\t"):
-                        ui["settings"]["at"] = (at + 1) % len(SETTING_ROWS)
+                        ui["settings"]["at"] = (at + 1) % len(rows)
                     elif keys in (b"k", b"\x1b[A"):
-                        ui["settings"]["at"] = (at - 1) % len(SETTING_ROWS)
+                        ui["settings"]["at"] = (at - 1) % len(rows)
                     elif keys in (b"l", b"\x1b[C", b"\r", b"\n", b" ", b"h", b"\x1b[D", b"r"):
                         change_setting(cfg, item, 0 if keys == b"r" else -1 if keys in (b"h", b"\x1b[D") else 1)
-                        apply_config(cfg, ui)
+                        apply_config(cfg, ui, store)
                         cfg_seen[0] = now_mtime()
+                        if account in store.off:   # el filtro apuntaba a una cuenta que se acaba de apagar
+                            account = None
+                        if focus_sid and getattr(store.sessions.get(focus_sid), "account", None) in store.off:
+                            focus_sid = None
                     continue
                 if keys in (b"q", b"\x03"):
                     break
@@ -2876,7 +2943,7 @@ def run(accounts, once, cfg):
                 elif keys == b"a":
                     focus_sid, ui["sel"] = None, None
                 elif keys == b"c" and store.multi:
-                    cycle = [None] + [a.name for a in accounts]
+                    cycle = [None] + [a.name for a in store.active]
                     account = cycle[(cycle.index(account) + 1) % len(cycle)]
                     focus_sid, ui["sel"] = None, None
                 elif keys in (b"j", b"k", b"\t", b"\x1b[A", b"\x1b[B") and sessions:
@@ -2893,15 +2960,16 @@ def run(accounts, once, cfg):
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
-def cmd_accounts(accounts):
+def cmd_accounts(accounts, disabled=()):
     table = Table(box=box.SIMPLE_HEAD, header_style=f"bold {LEAD}")
-    for col in ("cuenta", "ruta", "email", "abiertas", "transcripts"):
+    for col in ("cuenta", "estado", "ruta", "email", "abiertas", "transcripts"):
         table.add_column(col)
     for a in accounts:
         ok = os.path.isdir(a.path)
         open_ = len(glob.glob(os.path.join(a.live_dir, "*.json")))
         total = len(glob.glob(os.path.join(a.projects, "*", "*.jsonl")))
-        table.add_row(a.name, a.path.replace(HOME, "~") + ("" if ok else "  (no existe)"),
+        table.add_row(a.name, "deshabilitada" if a.name in disabled else "activa",
+                      a.path.replace(HOME, "~") + ("" if ok else "  (no existe)"),
                       a.email() or "—", str(open_), str(total))
     console = Console()
     console.print(table)
@@ -2919,6 +2987,9 @@ def main():
                     help="muestra solo esta cuenta (repetible)")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("accounts", help="lista las cuentas configuradas y detectadas")
+    for verb, text in (("disable", "deja de leer y mostrar una cuenta"), ("enable", "vuelve a mostrar una cuenta")):
+        p = sub.add_parser(verb, help=text)
+        p.add_argument("name")
     p = sub.add_parser("add", help="registra una cuenta")
     p.add_argument("name")
     p.add_argument("path", help="directorio de configuración de Claude Code (su CLAUDE_CONFIG_DIR)")
@@ -2991,7 +3062,16 @@ def main():
 
     accounts = resolve_accounts(cfg)
     if args.cmd == "accounts":
-        cmd_accounts(accounts)
+        cmd_accounts(accounts, cfg["disabled"])
+        return
+    if args.cmd in ("disable", "enable"):
+        if args.name not in {a.name for a in accounts}:
+            sys.exit(f"cc-dash: cuenta desconocida: {args.name} (hay: {', '.join(a.name for a in accounts) or 'ninguna'})")
+        cfg["disabled"] = [n for n in cfg["disabled"] if n != args.name]
+        if args.cmd == "disable":
+            cfg["disabled"].append(args.name)
+        save_config(cfg)
+        print(f"cuenta '{args.name}' {'deshabilitada' if args.cmd == 'disable' else 'activa'}")
         return
     if args.account:
         known = {a.name for a in accounts}
