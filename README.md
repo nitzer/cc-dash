@@ -109,7 +109,7 @@ lista de sesiones, panel del lead y actividad) y lanza un aviso si:
 
 Un subagente en marcha que lleva más de 5 minutos sin actividad se marca igual.
 Son sospechas, no certezas: un comando largo legítimo también dispara la
-tercera. Los umbrales son las constantes `STUCK_*` de `cc_dash.py`.
+tercera. Los umbrales se ajustan con `cc-dash set` (ver más abajo).
 
 El ritmo de consumo aparece junto al pulso (`tok/min`, media de los últimos 5
 minutos) y en el panel de actividad: tokens de salida de hoy en la sesión y en
@@ -162,6 +162,30 @@ Cuando una tarea se completa, además del toast: en la lista (`o`) un barrido
 de color recorre la fila y queda brillando unos segundos antes de pasar a
 tachada, y en la cabecera del lead la barra de progreso brilla y anuncia
 `✦ terminada: …`.
+
+## Umbrales y opciones
+
+```sh
+cc-dash set                    # lista claves, valores actuales y qué hacen
+cc-dash set stuck_tool 900     # una herramienta puede tardar 15 minutos
+cc-dash set stuck_silent 0     # 0 desactiva esa señal de atasco
+cc-dash set toasts false       # sin toasts (igual que la tecla X)
+```
+
+| Clave | Por defecto | Qué controla |
+| --- | --- | --- |
+| `stuck_errors` | 3 | errores seguidos para sospechar un atasco |
+| `stuck_repeat` | 4 | veces seguidas la misma llamada |
+| `stuck_tool` | 300 | segundos que una herramienta puede tardar en volver |
+| `stuck_silent` | 180 | segundos trabajando sin actividad |
+| `hide_after` | 60 | segundos que un subagente terminado sigue a la vista |
+| `toast_seconds` | 8 | segundos que dura un toast |
+| `toast_max` | 4 | toasts visibles a la vez |
+| `toasts`, `alerts`, `effects`, `auto_update` | true | interruptores |
+
+Los valores viven en `~/.config/cc-dash/config.toml`. Un dashboard abierto
+los relee en un par de segundos, sin reiniciarlo. `X` apaga o enciende los
+toasts de forma permanente; las novedades siguen llegando al registro (`n`).
 
 ## Sesiones que esperan tu respuesta
 

@@ -11,6 +11,7 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         t muestra/oculta los subagentes ya terminados
         o muestra la lista de tareas de la sesión (hechas, en curso y pendientes)
         n muestra el registro de novedades · x cierra todos los toasts
+        X apaga o enciende los toasts de forma permanente
         / busca en el log (Enter aplica, Esc borra) · y copia lo que se está viendo
         E activa o apaga los efectos (arranque, glitch en avisos, lluvia en reposo)
         Enter salta al panel de tmux de la sesión enfocada
@@ -28,6 +29,7 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
         cc-dash update
+        cc-dash set CLAVE VALOR     (umbrales y opciones; `cc-dash set` las lista)
 """
 import argparse
 import base64
@@ -62,7 +64,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -262,9 +264,29 @@ def config_path():
     return os.path.join(base, "cc-dash", "config.toml")
 
 
+# clave de configuración -> (constante que ajusta, valor por defecto, qué es)
+LIMITS = {
+    "stuck_errors": ("STUCK_ERRORS", 3, "errores seguidos para sospechar un atasco (0 = no mirar)"),
+    "stuck_repeat": ("STUCK_REPEAT", 4, "veces seguidas la misma llamada (0 = no mirar)"),
+    "stuck_tool": ("STUCK_TOOL", 300, "segundos que una herramienta puede tardar en volver (0 = no mirar)"),
+    "stuck_silent": ("STUCK_SILENT", 180, "segundos trabajando sin actividad (0 = no mirar)"),
+    "hide_after": ("LINGER", 60, "segundos que un subagente terminado sigue a la vista"),
+    "toast_seconds": ("TOAST_LIFE", 8, "segundos que dura un toast"),
+    "toast_max": ("TOAST_MAX", 4, "toasts visibles a la vez"),
+}
+SWITCHES = {"toasts": "mostrar toasts (tecla X)", "alerts": "pitido y aviso de tmux (tecla m)",
+            "effects": "arranque, glitch y lluvia (tecla E)", "auto_update": "actualizarse al arrancar"}
+
+
+def apply_limits(cfg):
+    """Pasa los umbrales de la configuración a las constantes que usa el dashboard."""
+    globals().update({const: cfg[key] for key, (const, _, _) in LIMITS.items()})
+
+
 def load_config():
     cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista",
-           "theme": "clasico", "alerts": True, "effects": True}
+           "theme": "clasico", "alerts": True, "effects": True, "toasts": True,
+           **{key: default for key, (_, default, _) in LIMITS.items()}}
     try:
         with open(config_path(), "rb") as fh:
             raw = tomllib.load(fh)
@@ -280,6 +302,12 @@ def load_config():
     cfg["theme"] = raw.get("theme") if raw.get("theme") in THEMES else "clasico"
     cfg["alerts"] = bool(raw.get("alerts", True))
     cfg["effects"] = bool(raw.get("effects", True))
+    cfg["toasts"] = bool(raw.get("toasts", True))
+    for key in LIMITS:
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            cfg[key] = int(value)
+    cfg["toast_max"] = max(1, cfg["toast_max"])
     return cfg
 
 
@@ -300,6 +328,10 @@ def save_config(cfg):
         f"alerts = {'true' if cfg['alerts'] else 'false'}",
         "# effects: arranque animado, glitch en los avisos y lluvia en reposo (tecla E).",
         f"effects = {'true' if cfg['effects'] else 'false'}",
+        "# toasts: novedades como recuadros en la esquina (tecla X); el registro (n) sigue igual.",
+        f"toasts = {'true' if cfg['toasts'] else 'false'}",
+        "# Umbrales. Se pueden cambiar aquí o con `cc-dash set CLAVE VALOR`; el dashboard los relee solo.",
+        *[f"{key} = {cfg[key]}".ljust(22) + f"# {what}" for key, (_, _, what) in LIMITS.items()],
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
     ]
     for a in cfg["account"]:
@@ -1013,15 +1045,15 @@ class Store:
         if self.state(s) != "busy":
             return []
         why = []
-        if s.err_streak >= STUCK_ERRORS:
+        if STUCK_ERRORS and s.err_streak >= STUCK_ERRORS:
             why.append(f"{s.err_streak} errores seguidos" + (f" en {s.err_last}" if s.err_last else ""))
-        if s.rep_n >= STUCK_REPEAT and s.rep_key:
+        if STUCK_REPEAT and s.rep_n >= STUCK_REPEAT and s.rep_key:
             why.append(f"repite {short_tool(s.rep_key[0])} {s.rep_n} veces igual")
         if s.pending:
             name, _, since = min(s.pending.values(), key=lambda p: p[2])
-            if since and now - since > STUCK_TOOL:
+            if STUCK_TOOL and since and now - since > STUCK_TOOL:
                 why.append(f"{name} lleva {age(now - since)} sin volver")
-        elif s.last and now - s.last > STUCK_SILENT:
+        elif STUCK_SILENT and s.last and now - s.last > STUCK_SILENT:
             why.append(f"sin actividad hace {age(now - s.last)}")
         return why
 
@@ -1297,7 +1329,7 @@ def agent_icon(v, phase, i=0):
 
 def agent_now(v):
     """Qué hace el subagente ahora mismo, o cómo terminó."""
-    if v["running"] and v["quiet"] > STUCK_TOOL:
+    if STUCK_TOOL and v["running"] and v["quiet"] > STUCK_TOOL:
         return (f"⚠ sin actividad hace {age(v['quiet'])}", ERR)
     if v["running"]:
         return (f"▶ {v['tool'][0]}: {v['tool'][1]}", TOOL) if v["tool"] else ("pensando…", DIM)
@@ -2218,6 +2250,7 @@ def new_ui():
     return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
+            "toasts_on": True,            # si las novedades salen como toast (tecla X)
             "toasts": [],                 # novedades en pantalla: {"born", "kind", "who", "text"}
             "news": False,                # registro de novedades en lugar de la actividad (tecla n)
             "tasks": False,               # lista de tareas en lugar de la actividad (tecla o)
@@ -2358,8 +2391,9 @@ def notify(store, ui, sid, kind, text, now):
     s = store.sessions.get(sid)
     who = store.label(s) if s else ""
     store.news.append({"ts": now, "sid": sid, "kind": kind, "who": who, "text": text})
-    ui["toasts"].append({"born": now, "kind": kind, "who": who, "text": text})
-    del ui["toasts"][:-TOAST_MAX]
+    if ui["toasts_on"]:
+        ui["toasts"].append({"born": now, "kind": kind, "who": who, "text": text})
+        del ui["toasts"][:-TOAST_MAX]
     if not NEWS[kind][3]:
         return
     if ui["effects"]:
@@ -2457,6 +2491,32 @@ def boot(console, store):
     time.sleep(0.25)
 
 
+def now_mtime():
+    try:
+        return os.path.getmtime(config_path())
+    except OSError:
+        return 0.0
+
+
+def reload_limits(cfg, ui, seen, now):
+    """Relee umbrales e interruptores si el archivo de configuración cambió por fuera."""
+    if now - seen[1] < 2:
+        return
+    seen[1] = now
+    stamp = now_mtime()
+    if stamp == seen[0]:
+        return
+    seen[0] = stamp
+    try:
+        fresh = load_config()
+    except SystemExit:   # archivo a medio escribir o con errores: se mantiene lo que había
+        return
+    for key in (*LIMITS, "toasts", "alerts", "effects"):
+        cfg[key] = fresh[key]
+    ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
+    apply_limits(cfg)
+
+
 def split_keys(raw):
     """Separa lo leído en teclas sueltas: al mantener una tecla llegan varias juntas."""
     return re.findall(rb"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|[\x00-\xff]", raw, re.S)
@@ -2470,8 +2530,10 @@ def run(accounts, once, cfg):
     store.ready = True
     ui = new_ui()
     ui["layout"], ui["theme"], ui["alerts"] = cfg["layout"], cfg["theme"], cfg["alerts"]
-    ui["effects"] = cfg["effects"]
+    ui["effects"], ui["toasts_on"] = cfg["effects"], cfg["toasts"]
     apply_theme(ui["theme"])
+    apply_limits(cfg)
+    cfg_seen = [now_mtime(), 0.0]   # [mtime de la configuración, última vez que se miró]
     if once or not sys.stdout.isatty():
         console.print(render(console, store, None, account, time.time(), ui)[0])
         return
@@ -2495,6 +2557,7 @@ def run(accounts, once, cfg):
                     notify(store, ui, sid, kind, text, now)
                 if focus is not None:
                     store.git_info(focus, now, refresh=True)
+                reload_limits(cfg, ui, cfg_seen, now)
                 if not queue:
                     live.update(root, refresh=True)
                     queue.extend(split_keys(read_keys(fd, 0.12)))
@@ -2530,6 +2593,16 @@ def run(accounts, once, cfg):
                     continue
                 if keys == b"x":
                     ui["toasts"].clear()
+                    continue
+                if keys == b"X":
+                    ui["toasts_on"] = cfg["toasts"] = not ui["toasts_on"]
+                    ui["toasts"].clear()
+                    ui["flash"] = ("toasts encendidos" if ui["toasts_on"]
+                                   else "toasts apagados · las novedades siguen en el registro (n)", now + 3)
+                    try:
+                        save_config(cfg)
+                    except OSError:
+                        pass
                     continue
                 if keys in (b"o", b"n"):
                     which, other = ("tasks", "news") if keys == b"o" else ("news", "tasks")
@@ -2733,11 +2806,36 @@ def main():
     p.add_argument("dir")
     sub.add_parser("config", help="muestra la ruta del archivo de configuración")
     sub.add_parser("update", help="trae los cambios del repo y reinstala")
+    p = sub.add_parser("set", help="cambia un umbral u opción; sin argumentos los lista")
+    p.add_argument("key", nargs="?")
+    p.add_argument("value", nargs="?")
     args = ap.parse_args()
 
     cfg = load_config()
     if args.cmd == "config":
         print(config_path())
+        return
+    if args.cmd == "set":
+        if args.key is None:
+            for key, (_, default, what) in LIMITS.items():
+                print(f"{key:<14} {cfg[key]:<6} {what} (por defecto {default})")
+            for key, what in SWITCHES.items():
+                print(f"{key:<14} {'true' if cfg[key] else 'false':<6} {what}")
+            return
+        if args.value is None:
+            sys.exit("cc-dash: falta el valor; uso: cc-dash set CLAVE VALOR")
+        if args.key in LIMITS:
+            if not args.value.isdigit():
+                sys.exit(f"cc-dash: {args.key} necesita un número entero mayor o igual que 0")
+            cfg[args.key] = max(1, int(args.value)) if args.key == "toast_max" else int(args.value)
+        elif args.key in SWITCHES:
+            if args.value.lower() not in ("true", "false", "on", "off", "si", "sí", "no"):
+                sys.exit(f"cc-dash: {args.key} necesita true o false")
+            cfg[args.key] = args.value.lower() in ("true", "on", "si", "sí")
+        else:
+            sys.exit(f"cc-dash: clave desconocida '{args.key}'; `cc-dash set` lista las disponibles")
+        save_config(cfg)
+        print(f"{args.key} = {str(cfg[args.key]).lower() if isinstance(cfg[args.key], bool) else cfg[args.key]}")
         return
     if args.cmd == "update":
         update()
