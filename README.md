@@ -20,6 +20,19 @@ cd cc-dash
 `~/.local/share/cc-dash` y enlaza `~/.local/bin/cc-dash`. Para quitarlo:
 `./install.sh --uninstall`.
 
+## Actualizar
+
+Si se instaló desde un clon de git, al abrir el dashboard `cc-dash` comprueba
+(como mucho cada 6 horas) si el repo tiene cambios; si los hay, hace
+`git pull --ff-only`, se reinstala y arranca ya con la versión nueva.
+
+```sh
+cc-dash update          # comprobar y actualizar ahora
+cc-dash --no-update     # abrir sin comprobar
+```
+
+Para desactivarlo, pon `auto_update = false` en la configuración.
+
 ## Usar
 
 ```sh
@@ -49,6 +62,7 @@ El archivo es `~/.config/cc-dash/config.toml` y se puede editar a mano:
 
 ```toml
 include_default = true          # añade ~/.claude si no está listada
+auto_update = true              # se actualiza solo al arrancar
 scan = ["/srv/dev/claude"]
 
 [[account]]

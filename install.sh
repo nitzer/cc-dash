@@ -15,6 +15,10 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
+# cc-dash usa esta ruta para actualizarse (cc-dash update)
+mkdir -p "$DEST"
+pwd > "$DEST/source"
+
 if command -v uv >/dev/null 2>&1; then
     uv tool install --force .
 elif command -v pipx >/dev/null 2>&1; then

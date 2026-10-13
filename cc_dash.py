@@ -9,11 +9,13 @@ Teclas: ↑/↓ o j/k cambia de sesión · c filtra por cuenta · a modo auto ·
         p abre el prompt de un subagente (←/→ subagente · ↑/↓ desplaza · p cierra)
 Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash accounts | add NOMBRE RUTA | remove NOMBRE | scan DIR | config
+        cc-dash update
 """
 import argparse
 import glob
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import time
@@ -36,7 +38,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -144,7 +146,7 @@ def config_path():
 
 
 def load_config():
-    cfg = {"account": [], "scan": [], "include_default": True}
+    cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True}
     try:
         with open(config_path(), "rb") as fh:
             raw = tomllib.load(fh)
@@ -155,6 +157,7 @@ def load_config():
     cfg["account"] = [a for a in raw.get("account", []) if a.get("name") and a.get("path")]
     cfg["scan"] = [d for d in raw.get("scan", []) if isinstance(d, str)]
     cfg["include_default"] = bool(raw.get("include_default", True))
+    cfg["auto_update"] = bool(raw.get("auto_update", True))
     return cfg
 
 
@@ -165,7 +168,9 @@ def save_config(cfg):
         "# cc-dash — cuentas de Claude Code a mostrar.",
         "# include_default: añade ~/.claude (o $CLAUDE_CONFIG_DIR) si no está listada.",
         "# scan: carpetas cuyas subcarpetas son cada una una cuenta.",
+        "# auto_update: al abrir el dashboard, busca cambios en el repo y se reinstala.",
         f"include_default = {'true' if cfg['include_default'] else 'false'}",
+        f"auto_update = {'true' if cfg['auto_update'] else 'false'}",
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
     ]
     for a in cfg["account"]:
@@ -203,6 +208,81 @@ def resolve_accounts(cfg):
         names.add(a.name)
         accounts.append(a)
     return accounts
+
+
+# ── actualización ────────────────────────────────────────────────────────
+
+UPDATE_EVERY = 6 * 3600  # segundos entre comprobaciones automáticas
+
+
+def data_dir():
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share"), "cc-dash")
+
+
+def source_dir():
+    """Clon de git desde el que se instaló (lo anota install.sh)."""
+    try:
+        with open(os.path.join(data_dir(), "source")) as fh:
+            src = fh.read().strip()
+    except OSError:
+        return None
+    return src if os.path.isdir(os.path.join(src, ".git")) else None
+
+
+def git(src, *args, timeout=30):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=8")
+    return subprocess.run(["git", "-C", src, *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def update(quiet=False):
+    """Trae cambios del repo y reinstala. Devuelve True si instaló algo nuevo."""
+    def say(msg, error=False):
+        if not quiet or not error:
+            print(f"cc-dash: {msg}", file=sys.stderr if error else sys.stdout)
+        return False
+
+    src = source_dir()
+    if not src:
+        return say("no hay un clon de git registrado; instala con ./install.sh desde un clon del repo", True)
+    try:
+        if git(src, "fetch", "--quiet").returncode:
+            return say(f"no se pudo consultar el repositorio remoto de {src}", True)
+        behind = git(src, "rev-list", "--count", "HEAD..@{u}").stdout.strip()
+        if behind in ("", "0"):
+            return False if quiet else say(f"ya está al día ({__version__})")
+        say(f"{behind} cambio(s) nuevo(s), actualizando…")
+        pull = git(src, "pull", "--ff-only", "--quiet")
+        if pull.returncode:
+            return say(f"no se pudo actualizar {src} (¿cambios locales?): {pull.stderr.strip()}", True)
+        inst = subprocess.run([os.path.join(src, "install.sh")], capture_output=True, text=True, timeout=600)
+        if inst.returncode:
+            return say(f"falló la reinstalación: {(inst.stderr or inst.stdout).strip()}", True)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return say(f"no se pudo actualizar: {exc}", True)
+    head = git(src, "log", "-1", "--format=%h %s").stdout.strip()
+    say(f"actualizado a {head}")
+    return True
+
+
+def auto_update():
+    """Comprueba como mucho cada UPDATE_EVERY; si actualiza, relanza el programa."""
+    if os.environ.get("CC_DASH_NO_UPDATE") or not source_dir():
+        return
+    stamp = os.path.join(data_dir(), "last-check")
+    try:
+        if time.time() - os.path.getmtime(stamp) < UPDATE_EVERY:
+            return
+    except OSError:
+        pass
+    try:
+        with open(stamp, "w"):
+            pass
+    except OSError:
+        return
+    if update(quiet=True):
+        os.environ["CC_DASH_NO_UPDATE"] = "1"
+        os.execv(sys.argv[0], sys.argv)
 
 
 # ── estado ───────────────────────────────────────────────────────────────
@@ -862,6 +942,7 @@ def main():
     ap = argparse.ArgumentParser(prog="cc-dash", description="Dashboard en vivo de sesiones de Claude Code.")
     ap.add_argument("--version", action="version", version=f"cc-dash {__version__}")
     ap.add_argument("--once", action="store_true", help="imprime un solo fotograma y sale")
+    ap.add_argument("--no-update", action="store_true", help="no busca actualizaciones al arrancar")
     ap.add_argument("-a", "--account", action="append", metavar="CUENTA",
                     help="muestra solo esta cuenta (repetible)")
     sub = ap.add_subparsers(dest="cmd")
@@ -874,11 +955,15 @@ def main():
     p = sub.add_parser("scan", help="registra una carpeta cuyas subcarpetas son cuentas")
     p.add_argument("dir")
     sub.add_parser("config", help="muestra la ruta del archivo de configuración")
+    sub.add_parser("update", help="trae los cambios del repo y reinstala")
     args = ap.parse_args()
 
     cfg = load_config()
     if args.cmd == "config":
         print(config_path())
+        return
+    if args.cmd == "update":
+        update()
         return
     if args.cmd == "add":
         path = os.path.abspath(os.path.expanduser(args.path))
@@ -919,6 +1004,8 @@ def main():
         accounts = [a for a in accounts if a.name in args.account]
     if not accounts:
         sys.exit("cc-dash: no hay cuentas; registra una con `cc-dash add NOMBRE RUTA`")
+    if cfg["auto_update"] and not args.no_update and not args.once and sys.stdout.isatty():
+        auto_update()
     run(accounts, args.once)
 
 
