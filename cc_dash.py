@@ -38,7 +38,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -53,7 +53,8 @@ LINE = "#3b4560"
 FG = "#c9d1e4"
 
 AGENT_TOOLS = ("Agent", "Task")
-SLOTS = 3
+MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
+SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
@@ -629,20 +630,24 @@ def diagram(store, s, w, compact, now):
     # subagentes
     agents = s.sorted_agents()
     running = s.running_agents() if state != "ended" else []
-    shown = agents[:SLOTS]
+    slots = max(MIN_SLOTS, min(len(agents), (w + 2) // (SLOT_WIDTH + 2)))
+    shown = agents[:slots]
     sgap = 2
-    sw = (w - sgap * (SLOTS - 1)) // SLOTS
-    xs = [i * (sw + sgap) + sw // 2 for i in range(SLOTS)]
+    sw = (w - sgap * (slots - 1)) // slots
+    xs = [i * (sw + sgap) + sw // 2 for i in range(slots)]
     trunk = lx + lw // 2
     btrunk = w // 2
     cv.put(trunk, 5, "│", LINE)
     cv.branch(6, xs, trunk, LINE, down=True)
-    if len(running) > SLOTS:
-        cv.put(max(0, w - 10), 5, f"+{len(running) - SLOTS} más", SWARM)
+    if len(agents) > slots:
+        hidden = agents[slots:]
+        live = sum(1 for a in hidden if a["end"] is None) if state != "ended" else 0
+        note = f"+{len(hidden)} más" + (f", {live} en marcha" if live else "") + " · p para verlos"
+        cv.put(max(0, w - len(note)), 5, note, SWARM if live else DIM)
     if not compact:
         cv.branch(14, xs, btrunk, LINE, down=False)
         cv.put(btrunk, 15, "▼", LINE)
-    for i in range(SLOTS):
+    for i in range(slots):
         x = i * (sw + sgap)
         a = shown[i] if i < len(shown) else None
         live = a is not None and a["end"] is None and state != "ended"
@@ -783,7 +788,7 @@ def footer(store, s, auto, account, now, prompt=False):
         t.append(f"[{value}]", style=f"bold {color}")
 
     field("lead", state, LEAD if state == "busy" else TOOL if state == "idle" else DIM)
-    field("subagents", f"{len(s.running_agents()) if state != 'ended' else 0}/{SLOTS}", SWARM)
+    field("subagents", f"{len(s.running_agents()) if state != 'ended' else 0}/{len(s.agents)}", SWARM)
     field("advisor", "on call" if s.advisor else "off", ADVISOR)
     field("tools", len(s.pending) if state != "ended" else 0, TOOL)
     if store.multi:
