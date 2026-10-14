@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1312,12 +1312,16 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
     cv.put(tx, 1, trunc(who, max(0, inner - len(right) - 2)), f"bold {lst}")
     cv.put(lx + lw - 2 - len(right), 1, right, f"bold {lst}")
-    stats = f"{s.turns} turnos · {s.tools} tools · salida {ktok(s.out_tokens)}"
+    pw = max(8, min(20, inner // 4))
+    for i, (ch, peak) in enumerate(zip(*pulse(s.beats, now, pw))):
+        cv.put(tx + i, 2, ch, lst if peak else LINE)
+    rate = sum(1 for t in s.beats if 0 <= now - t < 60)
+    stats = f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min · {s.turns} turnos"
     if s.ctx:
         stats += f" · contexto {min(100, round(100 * s.ctx / s.window()))}%"
     if s.cost is not None:
         stats += f" · ${s.cost:.2f}"
-    cv.put(tx, 2, trunc(stats, inner), DIM)
+    cv.put(tx + pw + 2, 2, trunc(stats, max(0, inner - pw - 2)), DIM)
     plain = list(s.pending.values())
     why = store.stuck(s, now)
     if state == "waiting":
@@ -1490,7 +1494,12 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     if compact:
         left = f"{short_model(s.model)} · contexto {pct}%" + (f" · ${s.cost:.2f}" if s.cost is not None else "")
         x = segs(cv, 0, 0, [("LEAD  ", f"bold {color}")])
-        cv.put(x, 0, trunc(left, max(0, w - x - len(right) - 2)), "bold")
+        pw = 16 if w - x - len(right) - len(left) > 24 else 0
+        cv.put(x, 0, trunc(left, max(0, w - x - len(right) - pw - 4)), "bold")
+        if pw:
+            px = w - len(right) - pw - 2
+            for i, (ch, peak) in enumerate(zip(*pulse(s.beats, now, pw))):
+                cv.put(px + i, 0, ch, color if peak else LINE)
         cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
         return 2
     x = segs(cv, 0, 0, [("LEAD  ", f"bold {color}")])
@@ -1809,16 +1818,10 @@ def side_panel(store, sessions, focus, rows, now, active=False):
         body.append(f"{dot} ", style=color)
         body.append(name, style="bold reverse" if s is focus else (FG if state != "ended" else DIM))
         body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=DIM)
-        pw = 9
         text = ("necesita " + store.waiting_for(s) if state == "waiting" else why[0] if why
                 else s.title or s.cwd.replace(HOME, "~") or "—")
-        text = trunc(text, width - 5 - pw)
-        body.append("    " + text + " " * (width - 4 - pw - len(text)),
+        body.append("    " + trunc(text, width - 4) + "\n",
                     style=WAIT if state == "waiting" else ERR if why else DIM)
-        chars, hot = pulse(s.beats, now, pw)
-        for ch, peak in zip(chars, hot):
-            body.append(ch, style=state_color(state) if peak else LINE)
-        body.append("\n")
     return Panel(body, title=label("sesiones"), title_align="left", box=PANEL_BOX,
                  border_style=LEAD if active else LINE)
 

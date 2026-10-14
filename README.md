@@ -86,9 +86,10 @@ lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
   un minuto de trabajo o cuando falla un subagente, suena el pitido de la
   terminal, aparece un mensaje en la barra de tmux y queda una línea `aviso`
   en el log. `m` los silencia (`alerts = false` en la configuración).
-- **Pulso:** cada sesión muestra una línea tipo electrocardiograma con las
-  herramientas usadas en los últimos 10 minutos, en la lista de sesiones y,
-  más grande, en la cabecera del lead junto a las herramientas por minuto.
+- **Pulso:** una línea tipo electrocardiograma con las herramientas que usó
+  la sesión enfocada en los últimos 10 minutos, junto a las herramientas y los
+  tokens por minuto, en la cabecera del lead del panel de agentes (en todos
+  los diseños).
 - **Temas:** `T` cambia entre `clasico`, `neon`, `matrix` y `ambar`; los tres
   últimos usan un marco tipo HUD (solo esquinas). También `cc-dash --theme neon`.
 
