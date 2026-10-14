@@ -51,6 +51,7 @@ Las principales:
 
 - `↑`/`↓` o `j`/`k`: cambia de sesión · `a`: vuelve al modo automático
 - `←`/`→`: selecciona un subagente · `r`/`p`: su respuesta o su prompt
+- `F`: foco en el subagente seleccionado (ver abajo)
 - `s`: cursor en el session log, con el detalle de cada entrada a la derecha
 - `o`: tareas · `n`: novedades · `v`: conversación de la sesión
 - `D`: abre el último `.md` que escribió la sesión (un spec, un plan…)
@@ -81,6 +82,24 @@ y hooks. Si no cabe, `AvPág`/`RePág` lo desplazan.
 
 La ventana de contexto no figura en los transcripts: se asume 1M si el modelo
 lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
+
+## Foco en un subagente
+
+`F` centra el dashboard en un subagente: el seleccionado o, si no hay ninguno,
+el primero a la vista.
+
+- La cabecera muestra `◎ FOCO <TIPO>` en el color del agente.
+- El session log muestra solo sus entradas, y `/` busca dentro de ellas.
+- El panel de la derecha pasa a su propia actividad: estado, modelo, tiempo,
+  qué hace ahora, ritmo, errores, y las listas de herramientas, skills,
+  archivos editados y leídos y MCP de ese agente. `r` y `p` cambian a su
+  respuesta y su prompt; `i` vuelve a la actividad.
+- En el gráfico de actividad, el agente enfocado va abajo y en su color, y
+  el resto queda apagado; el ritmo de la leyenda es solo el suyo.
+
+`←`/`→` pasan el foco al subagente siguiente o anterior. `F` o `Esc` salen del
+foco, igual que cambiar de sesión (`j`/`k`), volver al modo automático (`a`) o
+cambiar de cuenta (`c`).
 
 ## Saltar a una sesión, avisos, pulso y temas
 

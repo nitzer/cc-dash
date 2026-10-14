@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.31.1"
+__version__ = "0.32.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -532,7 +532,9 @@ class Session:
     def side_info(self, aid):
         return self.side.setdefault(aid, {"tools": 0, "tool": None, "text": "", "final": "",
                                           "out": 0, "done": None, "model": "", "last": 0.0,
-                                          "beats": deque(maxlen=600)})
+                                          "beats": deque(maxlen=600), "tool_counts": Counter(),
+                                          "skills": Counter(), "mcp": Counter(), "edits": Counter(),
+                                          "reads": set(), "errors": 0})
 
     def progress(self):
         """(hechas, total, texto de la tarea en curso) de la lista de tareas, o None si no hay."""
@@ -692,23 +694,26 @@ class Store:
             s.rev += 1
         return item
 
-    def count_tool(self, s, name, inp, ts=0.0):
+    def count_tool(self, s, name, inp, ts=0.0, info=None):
+        """Cuenta una herramienta en la sesión y, si es de un subagente, también en `info`."""
         s.tools += 1
         if ts:
             s.beats.append(ts)
-        s.tool_counts[short_tool(name)] += 1
-        if name == "Skill" and isinstance(inp, dict) and inp.get("skill"):
-            s.skills[inp["skill"]] += 1
-        if name.startswith("mcp__"):
-            s.mcp[name.split("__")[1]] += 1
         path = inp.get("file_path") or inp.get("notebook_path") if isinstance(inp, dict) else None
+        for target in (s.__dict__, info) if info is not None else (s.__dict__,):
+            target["tool_counts"][short_tool(name)] += 1
+            if name == "Skill" and isinstance(inp, dict) and inp.get("skill"):
+                target["skills"][inp["skill"]] += 1
+            if name.startswith("mcp__"):
+                target["mcp"][name.split("__")[1]] += 1
+            if path and name in ("Edit", "Write", "NotebookEdit"):
+                target["edits"][path] += 1
+            elif path and name == "Read":
+                target["reads"].add(path)
         if path and name in ("Edit", "Write", "NotebookEdit"):
-            s.edits[path] += 1
             if is_doc(path):
                 path = os.path.join(s.cwd or "", path)
                 s.docs = [p for p in s.docs if p != path] + [path]
-        elif path and name == "Read":
-            s.reads.add(path)
 
     def task_done(self, s, task):
         """Una tarea acaba de pasar a terminada: marca el momento (para el efecto) y avisa."""
@@ -805,6 +810,8 @@ class Store:
                 for b in content if isinstance(content, list) else []:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
                         self.attach(s, b)
+                        if b.get("is_error"):
+                            s.side_info(o["agentId"])["errors"] += 1
             return
 
         if kind == "ai-title":
@@ -952,7 +959,7 @@ class Store:
                 info["tools"] += 1
                 info["tool"] = (short_tool(name), tool_label(name, inp))
                 info["done"] = None
-                self.count_tool(s, name, inp, ts)
+                self.count_tool(s, name, inp, ts, info)
                 if ts:
                     info["beats"].append(ts)
                 item = s.open_items[b.get("id")] = {
@@ -1023,6 +1030,7 @@ class Store:
                 "tools": side.get("tools", 0), "tool": side.get("tool"), "out": side.get("out", 0),
                 "color": AGENT_COLORS[n % len(AGENT_COLORS)],   # por orden de creación: no cambia
                 "beats": side.get("beats") or (),
+                "side": side,   # actividad propia: herramientas, archivos, skills, errores
                 "model": a["model"] or (short_model(side["model"]) if side.get("model") else ""),
                 "status": a["status"] or ("completed" if end else ""),
                 "response": (side.get("final") or a["result"] or side.get("text") or "").strip(),
@@ -1204,7 +1212,7 @@ def graph_rows(h):
     return 4 if h >= 20 else 3
 
 
-def activity_graph(cv, y, w, h, s, agents, now, span=600):
+def activity_graph(cv, y, w, h, s, agents, now, span=600, focus=None):
     """Matriz de puntos con las herramientas usadas: una columna por intervalo, apilada por
     quién la usó (el lead y cada subagente en su color).
 
@@ -1213,7 +1221,13 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600):
     side = Counter(t for v in agents for t in v["beats"])
     lead = list((Counter(s.beats) - side).elements())
     sources = [("lead", LEAD, lead)] + [(v["type"], v["color"], v["beats"]) for v in agents
-                                        if any(0 <= now - t < span for t in v["beats"]) or v["running"]]
+                                        if any(0 <= now - t < span for t in v["beats"]) or v["running"]
+                                        or v["id"] == focus]
+    if focus is not None:   # modo foco: el agente enfocado primero (abajo) y el resto apagado
+        mine = next((v for v in agents if v["id"] == focus), None)
+        if mine is not None:
+            others = [(n, blend(LINE, c, 0.3), b) for n, c, b in sources if b is not mine["beats"]]
+            sources = [("◎ " + mine["type"], mine["color"], mine["beats"])] + others
     counts = [[0] * w for _ in sources]
     for k, (_, _, beats) in enumerate(sources):
         for t in beats:
@@ -1223,7 +1237,7 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600):
     totals = [sum(c[x] for c in counts) for x in range(w)]
     top = max(totals) or 1
     last = max((t for _, _, b in sources for t in b), default=0)
-    rate = sum(1 for t in s.beats if 0 <= now - t < 60)
+    rate = sum(1 for t in (sources[0][2] if focus is not None else s.beats) if 0 <= now - t < 60)
     # leyenda: un latido que se acelera con el ritmo, quién aporta cuánto y el ritmo total
     beat = (now * (0.8 + min(3.0, rate / 10))) % 1 < 0.22
     x = segs(cv, 0, y, [("◆ " if beat else "◇ ", f"bold {LEAD}" if beat else LINE), ("ACTIVIDAD ", f"bold {FG}"),
@@ -1234,7 +1248,7 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600):
         if x + len(part) > w - 26:
             break
         x = segs(cv, x, y, [("■ ", color), (f"{trunc(name, 14)} ", FG), (f"{n}  ", DIM)])
-    right = f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min"
+    right = f"{rate} tools/min" + ("" if focus is not None else f" · {ktok(round(s.token_rate(now)))} tok/min")
     cv.put(max(x, w - len(right)), y, right, DIM)
     fresh = now - last < 1.2
     base = y + rows
@@ -1477,7 +1491,7 @@ def put_cells(cv, x, y, cells):
                 cv.put(x + c, y + r, ch, style)
 
 
-def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
+def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focus=None):
     cv = Canvas(w, h)
     if s is None:
         cv.put(2, 2, "sin sesiones todavía — abre Claude Code en otra terminal", DIM)
@@ -1539,7 +1553,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     everyone = store.agents(s)
     agents = store.visible(s, now, show_all, sel)
     gh = graph_rows(h)
-    activity_graph(cv, h - gh, w, gh, s, everyone, now)
+    activity_graph(cv, h - gh, w, gh, s, everyone, now, focus=focus)
     h -= gh   # las tarjetas y las notas quedan por encima del gráfico
     trunk = lx + lw // 2
     # rostros grandes en una fila; si no caben todos y hay sitio para dos filas, más pequeños
@@ -1806,7 +1820,7 @@ def agents_header(cv, y, w, everyone, agents, shown, room):
         cv.put(x + 3, y, trunc(" · ".join(notes), max(0, room - x - 3)), DIM)
 
 
-def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_rain=False):
+def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_rain=False, focus=None):
     """Panel del lead y sus subagentes sin flechas, en el diseño elegido."""
     cv = Canvas(w, h)
     if s is None:
@@ -1816,7 +1830,7 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
     everyone = store.agents(s)
     agents = store.visible(s, now, show_all, sel)
     gh = graph_rows(h)
-    activity_graph(cv, h - gh, w, gh, s, everyone, now)
+    activity_graph(cv, h - gh, w, gh, s, everyone, now, focus=focus)
     h -= gh + 1   # el resto del panel queda por encima del gráfico
     y = lead_block(cv, store, s, w, now, phase, compact=layout == "tiempo" or h < 14)
     empty = "sin subagentes en uso" + (" — t muestra los terminados" if everyone else "")
@@ -1966,7 +1980,7 @@ def rain(cv, top, now, bottom=None):
                 cv.put(x, top + y, glyph, f"bold {FG}" if k == 0 else blend(TOOL, LINE, k / tail))
 
 
-def header(store, sessions, account, now, glitch=False, god=False):
+def header(store, sessions, account, now, glitch=False, god=False, focus=None):
     busy = sum(1 for s in sessions if store.state(s) == "busy")
     open_ = sum(1 for s in sessions if store.state(s) != "ended")
     title = Text(justify="center")
@@ -1974,6 +1988,9 @@ def header(store, sessions, account, now, glitch=False, god=False):
     title.append("▚▚ CLAUDE CODE" if HUD else "CLAUDE CODE", style=f"bold {LEAD}" if HUD else "bold")
     if god:
         title.append("  ★ GOD MODE ★", style=f"bold {breath(WAIT, now * 2)}")
+    if focus is not None:
+        title.append(sep, style=DIM)
+        title.append(f"◎ FOCO {focus['type'].upper()}", style=f"bold {breath(focus['color'], now)}")
     if store.multi:
         title.append(sep, style=DIM)
         title.append(f"CUENTA {account.upper()}" if account else f"{len(store.active)} CUENTAS",
@@ -2238,6 +2255,79 @@ def short_path(path, cwd, n):
     return path if len(path) <= n else "…" + path[-(n - 1):]
 
 
+def add_listing(t, width, title, items, color, total=None, extra="", limit=8, names=None):
+    """Sección en columna: un elemento por línea, con su cuenta y una barra proporcional."""
+    items = list(items)
+    t.append("\n" + title.upper(), style=f"bold {color}")
+    t.append(f"  {total if total is not None else sum(n for _, n in items)}" + (f" · {extra}" if extra else "") + "\n",
+             style=DIM)
+    cap = max(12, min(40, width - 24))
+    shown_names = [names(name, cap) if names else trunc(name, cap) for name, _ in items[:limit]]
+    name_w = max([8] + [len(x) for x in shown_names])
+    top = max((n for _, n in items), default=1)
+    for shown, (name, n) in zip(shown_names, items[:limit]):
+        t.append(f"  {shown:<{name_w}}", style=FG)
+        t.append(f" {n:>4}  ", style=color)
+        t.append("▮" * max(1, round(8 * n / top)), style=blend(LINE, color, 0.7))
+        t.append("\n")
+    if len(items) > limit:
+        t.append(f"  +{len(items) - limit} más\n", style=DIM)
+
+
+def scrolled(t, ui, rows):
+    """Recorta un texto largo a lo que cabe, desde ui["scroll"]. Devuelve (cuerpo, subtítulo)."""
+    lines = t.split("\n", allow_blank=True)
+    if lines and not lines[-1].plain:
+        lines = lines[:-1]
+    body_rows = max(1, rows - 2)
+    top = 0
+    if ui is not None:
+        ui["rows"] = body_rows
+        top = ui["scroll"] = max(0, min(ui["scroll"], len(lines) - body_rows))
+    body = Text("\n", no_wrap=True, overflow="ellipsis").join(lines[top: top + body_rows])
+    more = len(lines) - top - body_rows
+    pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
+    return body, pos if len(lines) > body_rows else None
+
+
+def agent_stats(t, s, v, now, width):
+    """Actividad de un solo subagente, para el modo foco."""
+    side = v["side"]
+
+    def row(label, value, style=FG):
+        t.append(f"{label:<11}", style=DIM)
+        t.append(value + "\n", style=style)
+
+    failed = bool(v["end"]) and v["status"] != "completed"
+    state = "en marcha" if v["running"] else ("✗ " + (v["status"] or "error")) if failed else \
+        "✓ terminado" if v["end"] else "interrumpido"
+    row("estado", state, v["color"] if v["running"] else ERR if failed else TOOL if v["end"] else DIM)
+    row("modelo", v["model"] or "—")
+    row("tiempo", agent_time(v, now))
+    text, tst = agent_now(v)
+    row("ahora", trunc(text, max(10, width - 15)), tst)
+    rate = sum(1 for t0 in v["beats"] if 0 <= now - t0 < 60)
+    row("ritmo", f"{rate} tools/min · {v['tools']} en total" + (f" · {side.get('errors', 0)} con error"
+                                                                   if side.get("errors") else ""))
+    tools = side.get("tool_counts") or Counter()
+    if tools:
+        add_listing(t, width, "tools", tools.most_common(), v["color"],
+                    extra=f"{side['errors']} con error" if side.get("errors") else "")
+    if side.get("skills"):
+        add_listing(t, width, "skills", side["skills"].most_common(), ADVISOR)
+    edits, reads = side.get("edits") or Counter(), side.get("reads") or set()
+    if edits:
+        only_read = len(reads - set(edits))
+        add_listing(t, width, "archivos editados", edits.most_common(), LEAD, total=len(edits),
+                    extra=f"{only_read} solo leído{'s' if only_read != 1 else ''}" if only_read else "",
+                    names=lambda p, n: short_path(p, s.cwd, n))
+    if reads - set(edits):
+        add_listing(t, width, "archivos leídos", [(p, 1) for p in sorted(reads - set(edits))], DIM,
+                    names=lambda p, n: short_path(p, s.cwd, n))
+    if side.get("mcp"):
+        add_listing(t, width, "mcp", side["mcp"].most_common(), FG)
+
+
 def stats_panel(store, s, now, ui=None, rows=40, width=60):
     """Actividad de la sesión enfocada: lo que se muestra sin subagente seleccionado."""
     t = Text(no_wrap=True, overflow="ellipsis")
@@ -2248,23 +2338,8 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
         t.append(f"{label:<11}", style=DIM)
         t.append(value + "\n", style=style)
 
-    def listing(title, items, color, total=None, extra="", limit=8, names=None):
-        """Sección en columna: un elemento por línea, con su cuenta y una barra proporcional."""
-        items = list(items)
-        t.append("\n" + title.upper(), style=f"bold {color}")
-        t.append(f"  {total if total is not None else sum(n for _, n in items)}" + (f" · {extra}" if extra else "") + "\n",
-                 style=DIM)
-        cap = max(12, min(40, width - 24))
-        shown_names = [names(name, cap) if names else trunc(name, cap) for name, _ in items[:limit]]
-        name_w = max([8] + [len(x) for x in shown_names])
-        top = max((n for _, n in items), default=1)
-        for shown, (name, n) in zip(shown_names, items[:limit]):
-            t.append(f"  {shown:<{name_w}}", style=FG)
-            t.append(f" {n:>4}  ", style=color)
-            t.append("▮" * max(1, round(8 * n / top)), style=blend(LINE, color, 0.7))
-            t.append("\n")
-        if len(items) > limit:
-            t.append(f"  +{len(items) - limit} más\n", style=DIM)
+    def listing(*args, **kw):
+        add_listing(t, width, *args, **kw)
 
     row("modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
                                          s.perm and f"permisos {s.perm}") if x))
@@ -2333,19 +2408,9 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
     if s.hooks:
         listing("hooks", s.hooks.most_common(), DIM)
     # el panel se desplaza con AvPág/RePág cuando las listas no caben
-    lines = t.split("\n", allow_blank=True)
-    if lines and not lines[-1].plain:
-        lines = lines[:-1]
-    body_rows = max(1, rows - 2)
-    top = 0
-    if ui is not None:
-        ui["rows"] = body_rows
-        top = ui["scroll"] = max(0, min(ui["scroll"], len(lines) - body_rows))
-    body = Text("\n", no_wrap=True, overflow="ellipsis").join(lines[top: top + body_rows])
-    more = len(lines) - top - body_rows
-    pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
+    body, pos = scrolled(t, ui, rows)
     return Panel(body, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE,
-                 subtitle=pos if len(lines) > body_rows else None, subtitle_align="right")
+                 subtitle=pos, subtitle_align="right")
 
 
 def tasks_panel(store, s, ui, rows, width, now):
@@ -2464,11 +2529,25 @@ def detail_panel(store, s, ui, rows, width, now):
     agents = store.visible(s, now, ui["all"], ui["sel"])
     i = next((n for n, v in enumerate(agents) if v["id"] == ui["sel"]), None)
     if i is None:
-        ui["sel"] = None
+        ui["sel"] = ui["focus"] = None
         if ui["news"]:
             return news_panel(store, ui, rows, width, now)
         return tasks_panel(store, s, ui, rows, width, now) if ui["tasks"] else stats_panel(store, s, now, ui, rows, width)
     v = agents[i]
+    focused = ui["focus"] == v["id"]
+    head = f"subagente {i + 1}/{len(agents)} · {v['type']}" + (f" · {v['model']}" if v["model"] else "")
+    if focused and ui["tab"] == "act":
+        t = Text(no_wrap=True, overflow="ellipsis")
+        t.append(" i actividad ", style="reverse bold")
+        t.append("  ")
+        t.append(" r respuesta ", style=DIM)
+        t.append(" ")
+        t.append(" p prompt ", style=DIM)
+        t.append("\n\n")
+        agent_stats(t, s, v, now, width)
+        body, pos = scrolled(t, ui, rows)
+        return Panel(body, title=trunc(f"◎ {head} · {v['desc']}", max(10, width - 6)), title_align="left",
+                     subtitle=pos, subtitle_align="right", box=PANEL_BOX, border_style=v["color"])
     prompt = ui["tab"] == "prompt"
     text = v["prompt"] if prompt else v["response"]
     if not text:
@@ -2483,18 +2562,21 @@ def detail_panel(store, s, ui, rows, width, now):
     ui["scroll"] = top
 
     tabs = Text(no_wrap=True, overflow="ellipsis")
+    if focused:
+        tabs.append(" i actividad ", style=DIM)
+        tabs.append("  ")
     tabs.append(" r respuesta ", style="reverse bold" if not prompt else DIM)
     tabs.append(" ")
     tabs.append(" p prompt ", style="reverse bold" if prompt else DIM)
     state = "en marcha" if v["running"] else "terminado" if v["status"] == "completed" else v["status"] or "interrumpido"
     tabs.append(f"   {state}", style=SWARM if v["running"] else DIM)
     body = Text("\n".join(lines[top: top + body_rows]), style=FG, no_wrap=True, overflow="ellipsis")
-    head = f"subagente {i + 1}/{len(agents)} · {v['type']}" + (f" · {v['model']}" if v["model"] else "")
+    head = ("◎ " if focused else "") + head
     more = len(lines) - top - body_rows
     pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
     return Panel(Group(tabs, Text(""), body), title=trunc(f"{head} · {v['desc']}", max(10, width - 6)),
                  title_align="left", subtitle=pos if len(lines) > body_rows else None,
-                 subtitle_align="right", box=PANEL_BOX, border_style=SWARM)
+                 subtitle_align="right", box=PANEL_BOX, border_style=v["color"] if focused else SWARM)
 
 
 _lines_cache = {}
@@ -2651,6 +2733,7 @@ KEYS = [
         ("r  ·  p", "su última respuesta  ·  su prompt"),
         ("Esc", "suelta la selección"),
         ("t", "muestra u oculta los ya terminados"),
+        ("F", "foco: log, actividad y gráfico solo de ese agente"),
     ]),
     ("Session log", [
         ("s", "cursor en el log (l entra al detalle)"),
@@ -2915,6 +2998,8 @@ def news_panel(store, ui, rows, width, now):
 def mode_hint(ui):
     if ui["help"] is not None:
         return "teclas · cualquier tecla cierra"
+    if ui["focus"] and ui["log"] is None and ui["typing"] is None and ui["settings"] is None and ui["session"] is None:
+        return "◎ foco · ←→ otro agente · i actividad · r respuesta · p prompt · F o Esc sale"
     if ui["settings"] is not None:
         return "configuración: j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar"
     if ui["typing"] is not None:
@@ -2931,7 +3016,9 @@ def mode_hint(ui):
 
 
 def new_ui():
-    return {"sel": None, "tab": "resp", "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
+    return {"sel": None, "tab": "resp",
+            "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
+            "focus": None,                # subagente enfocado (tecla F): todo se centra en él
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
             "cheat": "", "cheat_at": 0.0, "cheat_undo": None,   # lo tecleado hacia un truco
@@ -2988,7 +3075,8 @@ def render(console, store, focus_sid, account, now, ui=None):
 
     root = Layout()
     root.split_column(
-        Layout(header(store, sessions, account, now, glitch=now < ui["glitch"], god=ui["god"]),
+        Layout(header(store, sessions, account, now, glitch=now < ui["glitch"], god=ui["god"],
+                      focus=chosen if ui["focus"] else None),
                name="head", size=3),
         Layout(name="mid", size=dh + 2),
         bottom,
@@ -3008,10 +3096,10 @@ def render(console, store, focus_sid, account, now, ui=None):
         storm = now < ui["rain_until"]   # idkfa: llueve aunque haya trabajo
         if ui["layout"] == "diagrama":
             body = diagram(store, focus, inner, dh, now, ui["sel"], ui["all"],
-                           idle_rain="force" if storm else resting)
+                           idle_rain="force" if storm else resting, focus=ui["focus"])
         else:
             body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"],
-                         idle_rain="force" if storm else resting)
+                         idle_rain="force" if storm else resting, focus=ui["focus"])
         diag = Panel(body, box=PANEL_BOX, border_style=LINE,
                      title=trunc(focus.title, 60) if focus and focus.title else None, title_align="left",
                      subtitle=f"diseño: {ui['layout']} · d cambia", subtitle_align="right")
@@ -3678,19 +3766,33 @@ def run(accounts, once, cfg):
                 ids = [v["id"] for v in store.visible(focus, now, ui["all"], ui["sel"])]
                 page = max(1, ui["rows"] - 1)
                 if keys in (b"l", b"h", b"\x1b[C", b"\x1b[D"):
-                    order = [None] + ids
+                    order = ([] if ui["focus"] else [None]) + ids   # en foco se pasa de un agente a otro
                     i = order.index(ui["sel"]) if ui["sel"] in order else 0
-                    ui["sel"] = order[(i + (1 if keys in (b"l", b"\x1b[C") else -1)) % len(order)]
+                    if order:
+                        ui["sel"] = order[(i + (1 if keys in (b"l", b"\x1b[C") else -1)) % len(order)]
                     ui["scroll"] = 0
+                    if ui["focus"]:
+                        ui["focus"] = ui["sel"]
                     if ui["sel"]:
                         focus_sid = focus.sid  # que el modo auto no cambie de sesión mientras se lee
+                elif keys == b"F":
+                    if ui["focus"]:
+                        ui["focus"] = None
+                    elif ids:
+                        ui["sel"] = ui["sel"] if ui["sel"] in ids else ids[0]
+                        ui["focus"], focus_sid, ui["tab"], ui["scroll"] = ui["sel"], focus.sid, "act", 0
+                        ui["tasks"] = ui["news"] = False
+                    else:
+                        ui["flash"] = ("no hay subagentes a la vista para enfocar (t muestra los terminados)", now + 3)
                 elif keys == b"\x1b":
-                    ui["sel"] = None
+                    ui["sel"] = ui["focus"] = None
                 elif keys in (b"p", b"r"):
                     if ui["sel"] is None and ids:
                         ui["sel"], focus_sid = ids[0], focus.sid
                     ui["tab"] = "prompt" if keys == b"p" else "resp"
                     ui["scroll"] = 0
+                elif keys == b"i" and ui["focus"]:
+                    ui["tab"], ui["scroll"] = "act", 0
                 elif keys == b"i":
                     ui["info"] = not ui["info"]
                 elif keys == b"t":
@@ -3728,15 +3830,15 @@ def run(accounts, once, cfg):
                         step = -step   # el registro se cuenta desde el final: RePág va hacia atrás
                     ui["scroll"] = max(0, ui["scroll"] + step)
                 elif keys == b"a":
-                    focus_sid, ui["sel"] = None, None
+                    focus_sid, ui["sel"], ui["focus"] = None, None, None
                 elif keys == b"c" and store.multi:
                     cycle = [None] + [a.name for a in store.active]
                     account = cycle[(cycle.index(account) + 1) % len(cycle)]
-                    focus_sid, ui["sel"] = None, None
+                    focus_sid, ui["sel"], ui["focus"] = None, None, None
                 elif keys in (b"j", b"k", b"\t", b"\x1b[A", b"\x1b[B") and sessions:
                     step = -1 if keys in (b"k", b"\x1b[A") else 1
                     i = sessions.index(focus) if focus in sessions else 0
-                    focus_sid, ui["sel"] = sessions[(i + step) % len(sessions)].sid, None
+                    focus_sid, ui["sel"], ui["focus"] = sessions[(i + step) % len(sessions)].sid, None, None
                     ui["scroll"] = 0
                     if ui["session"] is not None:
                         ui["session"]["top"] = None
