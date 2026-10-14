@@ -81,16 +81,13 @@ Las principales:
 `tarjetas`, `tiempo` y `diagrama`. En `diagrama`, sin flechas, el lead ocupa
 la primera fila y debajo va una fila por subagente. Cada fila tiene el rostro
 cyberpunk del agente (calavera, oni, visor, respirador, kitsune o cíclope,
-según su tipo, en puntos de braille tramados), quién es y qué hace. Las filas
-de los subagentes cuelgan un poco a la derecha del lead, unidas por una guía
-tenue, y se reparten todo el alto del panel: con pocos subagentes, cada fila
-crece y su log muestra más líneas. A la derecha de cada fila va su log, sobre
-un fondo propio: el estado de cada acción (en curso, `✓` o `✗` en rojo), la
-herramienta en el color del agente, el detalle y hace cuánto. La acción más
-reciente va resaltada y las anteriores se apagan con la edad. El lead también
-muestra a la derecha sus últimas acciones. Si los subagentes no caben, se
-recorren con `j`/`k` o `←`/`→`. Mientras trabaja, los ojos del rostro laten; al terminar se
-apaga, y si falla se agrieta en rojo.
+según su tipo, en puntos de braille tramados), y a su lado quién es, cuánto
+lleva, qué hace y lo último que dijo, usando todo el ancho de la fila. Las
+filas de los subagentes cuelgan un poco a la derecha del lead, unidas por una
+guía tenue, y se encogen para que quepan todos; si no caben, se recorren con
+`j`/`k` o `←`/`→`. Lo que va haciendo cada agente se lee en el session log,
+donde sus entradas llevan el color del agente. Mientras trabaja, los ojos del
+rostro laten; al terminar se apaga, y si falla se agrieta en rojo.
 
 Cada subagente tiene un color propio, por orden de creación, que se repite en
 su tarjeta o fila en todos los diseños y en el gráfico de actividad.

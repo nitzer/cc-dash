@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.36.0"
+__version__ = "0.37.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1491,61 +1491,6 @@ def put_cells(cv, x, y, cells):
                 cv.put(x + c, y + r, ch, style)
 
 
-def recent_events(store, s, per=14, scan=4000):
-    """Últimas entradas del log de la sesión, por autor: "lead" o el id del subagente."""
-    out = {}
-    for e in reversed(store.log[-scan:]):
-        if e[1] == s.sid:
-            got = out.setdefault(e[5] or "lead", [])
-            if len(got) < per:
-                got.append(e)
-    return {k: v[::-1] for k, v in out.items()}
-
-
-def mini_log(cv, x, y, w, rows, events, color, now, live=True, bg=CARD_BG):
-    """Columna con lo que fue haciendo un agente, sobre fondo propio.
-
-    Cada línea: estado (en curso, ✓ o ✗), herramienta en el color del agente, el detalle y
-    hace cuánto. La más reciente va resaltada; las anteriores se apagan con la edad."""
-    for r in range(rows):
-        cv.put(x, y + r, " " * w, f"on {bg}")
-    shown = events[-rows:]
-    if not shown:
-        cv.put(x + 2, y, trunc("sin actividad todavía", w - 3), f"{DIM} on {bg}")
-        return
-    phase = int(now * 9)
-    for r, e in enumerate(shown):
-        ts, _, style, tag, text, _, ref = e
-        if tag.startswith("↳ ") and ": " in text:   # herramienta de un subagente: "Grep: patrón"
-            tag, text = text.split(": ", 1)
-        newest = r == len(shown) - 1
-        line_bg = blend(bg, color, 0.22) if newest else bg
-        fade = 0.45 + 0.55 * (r + 1) / len(shown)
-        bad = THEME.get(style, style) == ERR or text.startswith("✗") or bool(ref and ref.get("err"))
-        if ref and ref.get("k") == "tool" and ref.get("out") is None:
-            mark, mst = (SPIN[phase % len(SPIN)], f"bold {color}") if live and newest else ("·", DIM)
-        elif bad:
-            mark, mst = "✗", f"bold {ERR}"
-        elif ref and ref.get("k") == "tool":
-            mark, mst = "✓", blend(LINE, TOOL, fade)
-        else:
-            mark, mst = "•", blend(LINE, color, fade)
-        if text.startswith(("✓ ", "✗ ", "▶ ")):
-            text = text[2:]
-        yy = y + r
-        cv.put(x, yy, " " * w, f"on {line_bg}")
-        when = age(now - ts)
-        cv.put(x + 1, yy, mark, f"{mst} on {line_bg}")
-        name_w = min(10, max(5, w // 5))
-        cv.put(x + 3, yy, f"{trunc(tag, name_w):<{name_w}}",
-               f"bold {ERR if bad else blend(LINE, color, fade)} on {line_bg}")
-        room = w - name_w - len(when) - 6
-        if room > 3:
-            cv.put(x + 4 + name_w, yy, trunc(text, room),
-                   f"{ERR if bad else FG if newest else blend(LINE, FG, fade)} on {line_bg}")
-        cv.put(x + w - len(when) - 1, yy, when, f"{DIM} on {line_bg}")
-
-
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focus=None):
     """El lead en una fila y, debajo, una fila por subagente: su rostro, quién es y, a la
     derecha, el log de lo que fue haciendo."""
@@ -1560,7 +1505,6 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     gh = graph_rows(h)
     activity_graph(cv, h - gh, w, gh, s, everyone, now, focus=focus)
     h -= gh
-    recent = recent_events(store, s)
 
     # ── fila del lead ──
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
@@ -1568,11 +1512,8 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     # todas las filas comparten columnas: hueco fijo para la cara, luego el texto y luego el log
     slot = 12
     tx = 2 + slot + 2
-    col_w = max(16, min(34, (w - tx - 2) // 2))
-    log_x = tx + col_w + 1
     put_cells(cv, 2 + (slot - 6) // 2, 1, lead_face(state, now))
-    with_log = w - 1 - log_x >= 20
-    iw = col_w if with_log else w - tx - 2
+    iw = w - tx - 2
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
@@ -1599,9 +1540,6 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.put(tx, 3, trunc(f"▶ {name}{more}: {lab}", iw), TOOL)
     else:
         cv.put(tx, 3, trunc(s.title or "—", iw), DIM)
-    if with_log:
-        mini_log(cv, log_x, 1, w - log_x - 1, 3, [e for e in recent.get("lead", []) if e[3] != "Agent"], LEAD, now,
-                 live=state == "busy")
 
     # ── una fila por subagente ──
     top = 5
@@ -1614,7 +1552,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     avail = h - top - (1 if gone or (show_all and everyone) else 0)
     if rows_needed * 5 > avail:
         avail = h - top - 1   # hará falta la nota de "+N más"
-    card_h = max(5, min(14, avail // rows_needed))
+    card_h = max(5, min(8, avail // rows_needed))
     face_rows = 6 if card_h >= 8 else 4 if card_h >= 6 else 3
     fit = max(1, avail // card_h) * per_row
     first = max(0, idx - fit + 1) if idx is not None and idx >= fit else 0
@@ -1649,7 +1587,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     gap = 2
     cw = (w - indent - gap * (per_row - 1)) // per_row
     rows_shown = -(-len(shown) // per_row)
-    spare = max(0, avail - rows_shown * card_h)   # lo que sobra se lo lleva la última fila
+    spare = 0
     if indent:   # guía tenue desde el lead hasta cada fila
         mids = [top + r * card_h + card_h // 2 for r in range(rows_shown)]
         for yy in range(top, mids[-1]):
@@ -1669,29 +1607,27 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         if show_face:   # centrada en un hueco del mismo ancho para todas, sea cual sea su tamaño
             put_cells(cv, x + 2 + (slot - fw) // 2, y + 1, agent_face(v, phase, n, now, face_rows))
         ix = x + (tx if show_face else 2)
-        iw = col_w if per_row == 1 else max(16, min(30, (cw - (ix - x) - 2) // 2))
+        iw = x + cw - 2 - ix   # el texto ocupa todo el ancho de la fila
+        inner = this_h - 2
         icon, ist = agent_icon(v, phase, n)
-        cv.put(ix, y + 1, icon, ist)
-        cv.put(ix + 2, y + 1, trunc(v["type"], iw - 2), f"bold {v['color']}" if live else "bold" if chosen else FG)
-        desc = textwrap.wrap(v["desc"], iw) or [""]
-        dl = 2 if face_rows >= 6 else 1 if face_rows >= 4 else 0
-        for k in range(dl):
-            if k < len(desc):
-                text = desc[k] if k < dl - 1 or len(desc) <= dl else trunc(" ".join(desc[k:]), iw)
-                cv.put(ix, y + 2 + k, text, FG if live or chosen else DIM)
-        text, tst = agent_now(v)
-        cv.put(ix, y + 2 + dl, trunc(text, iw), tst)
         stat = agent_time(v, now) + (f" · {v['tools']} tools" if v["tools"] else "") + (f" · {v['model']}" if v["model"] else "")
-        cv.put(ix, y + 3 + dl, trunc(stat, iw), v["color"] if live else DIM)
-        # a la derecha, su log, sobre fondo propio
-        lx = ix + iw + 1
-        if per_row == 1 and show_face:
-            lx = log_x + indent   # el log de todos empieza en la misma columna, corrida como la tarjeta
-        if x + cw - 1 - lx >= 20:
-            mine = recent.get(v["aid"], []) + recent.get(v["id"], [])
-            mine.sort(key=lambda e: e[0])
-            mini_log(cv, lx, y + 1, x + cw - 1 - lx, this_h - 2, mine,
-                     v["color"] if live or chosen else blend(LINE, v["color"], 0.6), now, live=live)
+        cv.put(ix, y + 1, icon, ist)
+        cv.put(ix + 2, y + 1, trunc(v["type"], max(0, iw - len(stat) - 4)), f"bold {v['color']}" if live else "bold" if chosen else FG)
+        cv.put(ix + iw - len(stat), y + 1, stat, v["color"] if live else DIM)
+        lines = []   # (texto, estilo) bajo la cabecera, por orden de importancia
+        desc = textwrap.wrap(v["desc"], iw) or [""]
+        lines.append((desc[0] if len(desc) == 1 or inner < 5 else desc[0], FG if live or chosen else DIM))
+        if len(desc) > 1 and inner >= 5:
+            lines.append((trunc(" ".join(desc[1:]), iw), FG if live or chosen else DIM))
+        done_ok = bool(v["end"]) and not failed
+        if not (done_ok and v["response"]):   # terminado con respuesta: se muestra la respuesta abajo
+            text, tst = agent_now(v)
+            lines.insert(1 if inner < 5 else len(lines), (trunc(text, iw), tst))
+        if v["response"] and (v["running"] or v["end"]):   # lo último que dijo, si queda sitio
+            for part in textwrap.wrap(" ".join(v["response"].split()), iw - 2)[:max(0, inner - 1 - len(lines))]:
+                lines.append(("“ " + part, blend(LINE, FG, 0.6)))
+        for k, (text, style) in enumerate(lines[:inner - 1]):
+            cv.put(ix, y + 2 + k, trunc(text, iw), style)
     return cv.text()
 
 
@@ -2170,9 +2106,18 @@ def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, b
     gutter = 2 if cursor is not None else 0
     first = max(0, len(events) - rows) if cursor is None else max(0, min(cursor - rows // 2, len(events) - rows))
     chunk = events[first: first + rows]
+    colors = {}   # sid -> {id del subagente: color}, para pintar sus entradas como en el panel de agentes
+
+    def agent_color(sid, aid):
+        if sid not in colors:
+            owner = store.sessions.get(sid)
+            colors[sid] = {k: v["color"] for v in (store.agents(owner) if owner else []) for k in (v["id"], v["aid"]) if k}
+        return colors[sid].get(aid)
+
     for i, e in enumerate(chunk):
         ts, sid, style, tag, text = e[:5]
         s = store.sessions.get(sid)
+        tint = agent_color(sid, e[5]) if e[5] else None
         picked = cursor is not None and first + i == cursor
         line = Text(no_wrap=True)
         if gutter:
@@ -2181,7 +2126,8 @@ def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, b
         if col:
             name = trunc(store.label(s), col) if s else sid[:8]
             line.append(f"{name:<{col}} ", style=FG if s is focus else DIM)
-        line.append(f"{trunc(tag, 10):<10} ", style=THEME.get(style, style))
+        bad = THEME.get(style, style) == ERR
+        line.append(f"{trunc(tag, 10):<10} ", style=f"bold {tint}" if tint and not bad else THEME.get(style, style))
         line.append(trunc(text, max(10, width - 25 - col - gutter)), style=FG if s is focus or picked else DIM)
         if picked:
             line.pad_right(max(0, width - 4 - len(line.plain)))
