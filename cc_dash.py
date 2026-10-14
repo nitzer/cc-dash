@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.30.0"
+__version__ = "0.31.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1205,24 +1205,22 @@ def graph_rows(h):
 
 
 def activity_graph(cv, y, w, h, s, agents, now, span=600):
-    """Barras apiladas de herramientas por minuto: el lead y cada subagente en su color.
+    """Matriz de puntos con las herramientas usadas: una columna por intervalo, apilada por
+    quién la usó (el lead y cada subagente en su color).
 
-    Cuanto más uso, más intenso el color; la columna de ahora late con cada herramienta nueva."""
+    Cuanto más uso, más intenso el color; la columna de ahora destella con cada herramienta nueva."""
     rows = h - 1
     side = Counter(t for v in agents for t in v["beats"])
     lead = list((Counter(s.beats) - side).elements())
     sources = [("lead", LEAD, lead)] + [(v["type"], v["color"], v["beats"]) for v in agents
                                         if any(0 <= now - t < span for t in v["beats"]) or v["running"]]
-    # barras de 2 columnas, suavizadas con sus vecinas para que se lea como un pulso y no como ruido
-    nb = max(1, w // 2)
-    raw = [[0] * nb for _ in sources]
+    counts = [[0] * w for _ in sources]
     for k, (_, _, beats) in enumerate(sources):
         for t in beats:
             back = now - t
             if 0 <= back < span:
-                raw[k][nb - 1 - int(back / span * nb)] += 1
-    counts = [[(r[b - 1] if b else 0) + 2 * r[b] + (r[b + 1] if b + 1 < nb else 0) for b in range(nb)] for r in raw]
-    totals = [sum(c[b] for c in counts) for b in range(nb)]
+                counts[k][w - 1 - int(back / span * w)] += 1
+    totals = [sum(c[x] for c in counts) for x in range(w)]
     top = max(totals) or 1
     last = max((t for _, _, b in sources for t in b), default=0)
     rate = sum(1 for t in s.beats if 0 <= now - t < 60)
@@ -1239,29 +1237,34 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600):
     right = f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min"
     cv.put(max(x, w - len(right)), y, right, DIM)
     fresh = now - last < 1.2
-    off = w - 2 * nb
-    for b in range(nb):
-        col, total = off + 2 * b, totals[b]
-        base = y + rows
-        if not total:
-            cv.put(col, base, "▁▁", LINE)
+    base = y + rows
+    levels = (0x40 | 0x80, 0x04 | 0x20, 0x02 | 0x10, 0x01 | 0x08)   # filas de puntos, de abajo arriba
+    for col in range(w):
+        total = totals[col]
+        tick = (w - 1 - col) % max(1, round(w / 5)) == 0   # una marca cada 2 minutos
+        if not total:   # línea base de puntos, con las marcas de tiempo más claras
+            cv.put(col, base, "⣀", DIM if tick else LINE)
             continue
-        height = max(1, round(total / top * rows * 8))
-        k = 0.35 + 0.65 * total / top
+        height = max(1, round(total / top * rows * 4))
+        k = 0.4 + 0.6 * total / top
         bounds, acc = [], 0
         for c in counts:
-            acc += c[b]
+            acc += c[col]
             bounds.append(acc / total * height)
         for r in range(rows):
-            fill = min(8, height - 8 * r)
-            if fill <= 0:
+            dots = min(4, height - 4 * r)
+            if dots <= 0:
                 break
-            mid = 8 * r + fill / 2
+            mid = 4 * r + dots / 2
             color = sources[next(i for i, b in enumerate(bounds) if mid <= b + 1e-9)][1]
-            style = f"bold {blend(LINE, color, k)}" if k > 0.8 else blend(LINE, color, k)
-            if b == nb - 1 and fresh:   # latido: la barra de ahora destella
+            style = blend(LINE, color, k)
+            if 4 * r + dots == height:   # el punto más alto, más claro: la cresta
+                style = blend(style, "#ffffff", 0.25)
+            if k > 0.8:
+                style = f"bold {style}"
+            if col == w - 1 and fresh:   # latido
                 style = "bold #ffffff"
-            cv.put(col, base - r, " ▁▂▃▄▅▆▇█"[fill] * 2, style)
+            cv.put(col, base - r, chr(0x2800 + sum(levels[:dots])), style)
 
 
 def hpath(x0, x1, y):

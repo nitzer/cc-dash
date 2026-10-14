@@ -92,9 +92,11 @@ lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
   terminal, aparece un mensaje en la barra de tmux y queda una línea `aviso`
   en el log. `m` los silencia (`alerts = false` en la configuración).
 - **Actividad:** al pie del panel de agentes, en todos los diseños, un
-  gráfico de barras con las herramientas que usó la sesión enfocada en los
-  últimos 10 minutos. Las barras se apilan por quién las usó: el lead en
-  naranja y cada subagente en su color. Cuanto más uso, más intenso el color.
+  gráfico de matriz de puntos con las herramientas que usó la sesión enfocada
+  en los últimos 10 minutos, una columna por intervalo de unos segundos y una
+  marca en la base cada 2 minutos. Las columnas se apilan por quién las usó: el
+  lead en naranja y cada subagente en su color. Cuanto más uso, más intenso el
+  color.
   La barra de ahora destella con cada herramienta nueva, y el rombo de la
   leyenda late más rápido cuanto más ritmo hay. La leyenda muestra cuántas
   herramientas aportó cada uno, más las herramientas y los tokens por minuto.
