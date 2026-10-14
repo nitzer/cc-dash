@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.33.0"
+__version__ = "0.34.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2763,7 +2763,7 @@ KEYS = [
         ("F", "foco: log, actividad y gráfico solo de ese agente"),
     ]),
     ("Session log", [
-        ("s", "cursor en el log (l entra al detalle)"),
+        ("s", "cursor en el log (Enter abre el detalle)"),
         ("f", "solo las entradas de la sesión enfocada"),
         ("/", "busca texto (Enter aplica, Esc borra)"),
         ("y", "copia lo que tienes delante"),
@@ -2789,7 +2789,7 @@ KEYS = [
         ("Tab  ·  Shift+Tab", "pasa el foco al panel siguiente o anterior"),
         ("j k", "se mueve dentro del panel con el foco"),
         ("gg  ·  G", "primero  ·  último"),
-        ("Enter", "agentes: foco · log: detalle · actividad: despliega"),
+        ("Enter", "agentes: foco · log: detalle flotante · actividad: despliega"),
     ]),
     ("General", [
         ("?", "esta ayuda"),
@@ -3031,6 +3031,8 @@ def news_panel(store, ui, rows, width, now):
 def mode_hint(ui):
     if ui["help"] is not None:
         return "teclas · cualquier tecla cierra"
+    if ui["entry"] is not None:
+        return "detalle · j/k desplaza · gg/G principio/final · y copia · Esc o Enter cierra"
     free = ui["log"] is None and ui["typing"] is None and ui["settings"] is None and ui["session"] is None
     if ui["focus"] and free:
         return "◎ foco · j/k otro agente · i actividad · r respuesta · p prompt · F o Esc sale · tab panel"
@@ -3044,9 +3046,7 @@ def mode_hint(ui):
     if ui["typing"] is not None:
         return f"buscar: {query(ui)}▌   Enter aplica · Esc borra el filtro"
     if ui["log"] is not None:
-        if ui["log"]["pane"] == "out":
-            return "jk desplaza el detalle · h vuelve al log · AvPág/RePág · s cierra · q salir"
-        return "jk entrada · l entra al detalle · AvPág/RePág · g primera · G última · s cierra · q salir"
+        return "log · j/k entrada · Enter abre el detalle · gg/G primera/última · tab panel · Esc cierra"
     if ui["session"] is not None:
         if ui["session"]["pane"] == "out":
             return "jk desplaza · h vuelve a sesiones · AvPág/RePág · G en vivo · v cierra · q salir"
@@ -3063,6 +3063,7 @@ def new_ui():
             "dcur": 0, "dlines": 0, "dkind": "text", "dmarks": {},   # cursor del panel derecho
             "open": set(),                # listas desplegadas en la actividad
             "g_at": 0.0,                  # cuándo llegó una g, para reconocer gg
+            "entry": None,                # entrada del log abierta en ventana flotante (Enter)
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
             "cheat": "", "cheat_at": 0.0, "cheat_undo": None,   # lo tecleado hacia un truco
@@ -3103,7 +3104,6 @@ def render(console, store, focus_sid, account, now, ui=None):
     log_w = width - detail_w if split else width
     if lg is not None:
         at = log_cursor(events, lg)
-        detail = event_panel(store, events[at] if events else None, lg, rows, detail_w, now)
         log = log_panel(store, focus, events, title, narrowed, rows, log_w, cursor=at,
                         border=LEAD if lg["pane"] == "list" else LINE)
     else:
@@ -3179,6 +3179,9 @@ def render(console, store, focus_sid, account, now, ui=None):
     elif ui["settings"] is not None:
         modal_w = min(66, width - 2)
         modal = settings_panel(ui["cfg"], store, ui["settings"], modal_w, height - 4)
+    elif ui["entry"] is not None:   # detalle de una entrada del log, en ventana flotante
+        modal_w = min(120, width - 4)
+        modal = event_panel(store, ui["entry"]["e"], ui["entry"], max(8, height - 6), modal_w, now)
     if ui["toasts"] or modal is not None:
         tw = max(30, min(46, width // 2))
         root = Overlay(root, [toast_panel(t, tw, now) for t in ui["toasts"]], tw,
@@ -3577,6 +3580,32 @@ def run(accounts, once, cfg):
     saved = termios.tcgetattr(fd) if fd is not None else None
     focus_sid = None
     seen = {}        # sid -> (estado, desde cuándo trabaja), para los avisos
+
+    def view_doc(doc):
+        """Abre un .md con el visor configurado (popup de tmux, o la terminal entera sin tmux)."""
+        why = open_doc(cfg, doc)
+        if why == "tty":   # sin tmux: el visor toma la terminal hasta que se cierre
+            live.stop()
+            if saved is not None:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            subprocess.run(viewer_command(cfg, doc), shell=True)
+            if fd is not None:
+                tty.setcbreak(fd)
+            live.start(refresh=True)
+            why = ""
+        ui["flash"] = (why or f"abierto {os.path.basename(doc)}", time.time() + 4)
+
+    def open_entry(e):
+        """Enter sobre una entrada del log: un .md se abre con el visor; lo demás, en una ventana flotante."""
+        ref = e[6]
+        path = (ref.get("input") or {}).get("file_path") if ref and ref["k"] == "tool" else None
+        if is_doc(path):
+            s = store.sessions.get(e[1])
+            full = os.path.join(s.cwd if s else "", path)
+            if os.path.isfile(full):
+                view_doc(full)
+                return
+        ui["entry"] = {"e": e, "scroll": 0, "rows": 1, "pane": "out"}
     queue = deque()  # teclas leídas y aún sin procesar
     try:
         if fd is not None:
@@ -3629,6 +3658,35 @@ def run(accounts, once, cfg):
                     continue
                 if keys == b"?" and ui["settings"] is None:
                     ui["help"] = {"top": 0, "rows": 1}
+                    continue
+                if ui["entry"] is not None:
+                    # ventana flotante con el detalle de una entrada del log
+                    ev = ui["entry"]
+                    page = max(1, ev["rows"] - 2)
+                    if keys == b"g" and now - ui["g_at"] > 0.6:
+                        ui["g_at"] = now
+                        continue
+                    if keys in (b"\x1b", b"q", b"\r", b"\n", b"h"):
+                        ui["entry"] = None
+                    elif keys == b"\x03":
+                        break
+                    elif keys in (b"j", b"\x1b[B"):
+                        ev["scroll"] += 1
+                    elif keys in (b"k", b"\x1b[A"):
+                        ev["scroll"] = max(0, ev["scroll"] - 1)
+                    elif keys in (b" ", b"\x1b[6~"):
+                        ev["scroll"] += page
+                    elif keys in (b"b", b"\x1b[5~"):
+                        ev["scroll"] = max(0, ev["scroll"] - page)
+                    elif keys in (b"g", b"\x1b[H"):
+                        ev["scroll"], ui["g_at"] = 0, 0.0
+                    elif keys in (b"G", b"\x1b[F"):
+                        ev["scroll"] = 10 ** 6
+                    elif keys == b"y":
+                        text = shown_text(store, focus, ui, now)
+                        if text:
+                            copy_text(text)
+                        ui["flash"] = (f"copiado ({len(text)} caracteres)" if text else "nada que copiar", now + 3)
                     continue
                 if ui["settings"] is not None:
                     # ventana de configuración: captura todas las teclas
@@ -3698,17 +3756,9 @@ def run(accounts, once, cfg):
                     continue
                 if keys == b"D":
                     doc = next((p for p in reversed(focus.docs) if os.path.isfile(p)), None) if focus else None
-                    why = open_doc(cfg, doc) if doc else "esta sesión no ha escrito ningún .md"
-                    if why == "tty":   # sin tmux: el visor toma la terminal hasta que se cierre
-                        live.stop()
-                        if saved is not None:
-                            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-                        subprocess.run(viewer_command(cfg, doc), shell=True)
-                        if fd is not None:
-                            tty.setcbreak(fd)
-                        live.start(refresh=True)
-                        why = ""
-                    ui["flash"] = (why or f"abierto {os.path.basename(doc)}", now + 4)
+                    view_doc(doc) if doc else None
+                    if not doc:
+                        ui["flash"] = ("esta sesión no ha escrito ningún .md", now + 4)
                     continue
                 if keys == b"x":
                     ui["toasts"].clear()
@@ -3755,8 +3805,6 @@ def run(accounts, once, cfg):
                     if nxt == "log":
                         ui["log"] = ui["log"] or {"cur": None, "scroll": 0, "rows": 1, "pane": "list"}
                         ui["log"]["pane"] = "list"
-                    elif nxt == "detalle" and ui["log"] is not None and cur == "log":
-                        ui["log"]["pane"] = "out"   # el detalle de la entrada elegida
                     else:
                         ui["log"] = None
                     if nxt == "agentes" and focus is not None:
@@ -3782,10 +3830,9 @@ def run(accounts, once, cfg):
                     handled = True
                     if keys in (b"s", b"S", b"\x1b"):
                         ui["log"] = None
-                    elif keys in (b"h", b"\x1b[D"):
-                        lg["pane"], ui["pane"] = "list", "log"
-                    elif keys in (b"l", b"\x1b[C", b"\r", b"\n"):
-                        lg["pane"], ui["pane"] = "out", "detalle"
+                    elif keys in (b"l", b"\x1b[C", b"\r", b"\n", b" "):
+                        if events:
+                            open_entry(events[at])
                     elif inside and keys in (b"k", b"\x1b[A"):
                         lg["scroll"] = max(0, lg["scroll"] - 1)
                     elif inside and keys in (b"j", b"\x1b[B"):
@@ -3795,9 +3842,9 @@ def run(accounts, once, cfg):
                     elif keys in (b"j", b"\x1b[B"):
                         move = at + 1
                     elif keys in (b"b", b"\x1b[5~"):
-                        lg["scroll"] = max(0, lg["scroll"] - page)
-                    elif keys in (b" ", b"\x1b[6~"):
-                        lg["scroll"] += page
+                        move = at - page
+                    elif keys == b"\x1b[6~":
+                        move = at + page
                     elif inside and first:
                         lg["scroll"] = 0
                     elif inside and last:

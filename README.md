@@ -55,8 +55,13 @@ flechas) se mueven, `gg` va al primero y `G` al último:
 - **sesiones:** cambia de sesión; `Enter` salta a su panel de tmux.
 - **agentes:** elige subagente (al entrar se elige el primero); `Enter` activa
   el modo foco sobre él.
-- **session log:** mueve el cursor por las entradas; `l` o `Enter` abre el
-  detalle a la derecha.
+- **session log:** mueve el cursor por las entradas. `Enter` (o espacio)
+  abre el detalle de la entrada en una ventana flotante: si es un `.md` que la
+  sesión escribió, editó o leyó, lo abre con el visor configurado (`glow -p`
+  en un popup de tmux); si no, en una ventana dentro del dashboard con la
+  entrada, la salida y los parámetros completos (`j`/`k` desplazan, `y` copia,
+  `Esc` o `Enter` cierran). El panel derecho ya no cambia solo al mover el
+  cursor.
 - **panel derecho:** en la actividad, un cursor recorre las líneas y `Enter`
   despliega o pliega la lista bajo el cursor (herramientas, archivos, skills…)
   para verla entera. En respuestas, prompts, tareas o novedades, `j`/`k`
@@ -67,7 +72,7 @@ Las principales:
 - `↑`/`↓` o `j`/`k`: cambia de sesión · `a`: vuelve al modo automático
 - `←`/`→`: selecciona un subagente · `r`/`p`: su respuesta o su prompt
 - `F`: foco en el subagente seleccionado (ver abajo)
-- `s`: cursor en el session log, con el detalle de cada entrada a la derecha
+- `s`: cursor en el session log; `Enter` abre el detalle de la entrada en una ventana flotante
 - `o`: tareas · `n`: novedades · `v`: conversación de la sesión
 - `D`: abre el último `.md` que escribió la sesión (un spec, un plan…)
 - `d`: diseño · `T`: tema · `,`: configuración · `q`: sale
