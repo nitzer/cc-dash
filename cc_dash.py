@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.35.1"
+__version__ = "0.36.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1491,7 +1491,7 @@ def put_cells(cv, x, y, cells):
                 cv.put(x + c, y + r, ch, style)
 
 
-def recent_events(store, s, per=8, scan=3000):
+def recent_events(store, s, per=14, scan=4000):
     """Últimas entradas del log de la sesión, por autor: "lead" o el id del subagente."""
     out = {}
     for e in reversed(store.log[-scan:]):
@@ -1502,29 +1502,48 @@ def recent_events(store, s, per=8, scan=3000):
     return {k: v[::-1] for k, v in out.items()}
 
 
-def mini_log(cv, x, y, w, rows, events, color, bg=CARD_BG):
-    """Columna con lo que fue haciendo un agente, sobre fondo propio para distinguirla."""
+def mini_log(cv, x, y, w, rows, events, color, now, live=True, bg=CARD_BG):
+    """Columna con lo que fue haciendo un agente, sobre fondo propio.
+
+    Cada línea: estado (en curso, ✓ o ✗), herramienta en el color del agente, el detalle y
+    hace cuánto. La más reciente va resaltada; las anteriores se apagan con la edad."""
     for r in range(rows):
         cv.put(x, y + r, " " * w, f"on {bg}")
     shown = events[-rows:]
     if not shown:
-        cv.put(x + 1, y, trunc("sin actividad todavía", w - 2), f"{DIM} on {bg}")
+        cv.put(x + 2, y, trunc("sin actividad todavía", w - 3), f"{DIM} on {bg}")
         return
+    phase = int(now * 9)
     for r, e in enumerate(shown):
-        ts, _, style, tag, text = e[:5]
+        ts, _, style, tag, text, _, ref = e
         if tag.startswith("↳ ") and ": " in text:   # herramienta de un subagente: "Grep: patrón"
             tag, text = text.split(": ", 1)
-        bad = THEME.get(style, style) == ERR or text.startswith("✗")
-        line_y = y + r
-        cx = segs(cv, x + 1, line_y, [(time.strftime("%H:%M:%S", time.localtime(ts)) + " ", f"{DIM} on {bg}")])
-        if cx >= x + w - 4:
-            continue
-        name = trunc(tag, 9)
-        cv.put(cx, line_y, f"{name:<9} ", f"bold {ERR if bad else color} on {bg}")
-        room = x + w - 1 - (cx + 10)
+        newest = r == len(shown) - 1
+        line_bg = blend(bg, color, 0.22) if newest else bg
+        fade = 0.45 + 0.55 * (r + 1) / len(shown)
+        bad = THEME.get(style, style) == ERR or text.startswith("✗") or bool(ref and ref.get("err"))
+        if ref and ref.get("k") == "tool" and ref.get("out") is None:
+            mark, mst = (SPIN[phase % len(SPIN)], f"bold {color}") if live and newest else ("·", DIM)
+        elif bad:
+            mark, mst = "✗", f"bold {ERR}"
+        elif ref and ref.get("k") == "tool":
+            mark, mst = "✓", blend(LINE, TOOL, fade)
+        else:
+            mark, mst = "•", blend(LINE, color, fade)
+        if text.startswith(("✓ ", "✗ ", "▶ ")):
+            text = text[2:]
+        yy = y + r
+        cv.put(x, yy, " " * w, f"on {line_bg}")
+        when = age(now - ts)
+        cv.put(x + 1, yy, mark, f"{mst} on {line_bg}")
+        name_w = min(10, max(5, w // 5))
+        cv.put(x + 3, yy, f"{trunc(tag, name_w):<{name_w}}",
+               f"bold {ERR if bad else blend(LINE, color, fade)} on {line_bg}")
+        room = w - name_w - len(when) - 6
         if room > 3:
-            last = r == len(shown) - 1
-            cv.put(cx + 10, line_y, trunc(text, room), f"{ERR if bad else FG if last else blend(LINE, FG, 0.7)} on {bg}")
+            cv.put(x + 4 + name_w, yy, trunc(text, room),
+                   f"{ERR if bad else FG if newest else blend(LINE, FG, fade)} on {line_bg}")
+        cv.put(x + w - len(when) - 1, yy, when, f"{DIM} on {line_bg}")
 
 
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focus=None):
@@ -1581,20 +1600,22 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     else:
         cv.put(tx, 3, trunc(s.title or "—", iw), DIM)
     if with_log:
-        mini_log(cv, log_x, 1, w - log_x - 1, 3, [e for e in recent.get("lead", []) if e[3] != "Agent"], LEAD)
+        mini_log(cv, log_x, 1, w - log_x - 1, 3, [e for e in recent.get("lead", []) if e[3] != "Agent"], LEAD, now,
+                 live=state == "busy")
 
     # ── una fila por subagente ──
     top = 5
+    indent = 4 if w >= 90 else 0   # los subagentes cuelgan un poco a la derecha del lead
     gone = len(everyone) - len(agents)
     idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
     per_row = 2 if w >= 170 else 1
     rows_needed = max(1, -(-len(agents) // per_row))
-    # el tamaño más grande con el que caben todos; si no caben, el más pequeño y se pagina
+    # las filas se reparten todo el alto que queda; si no caben ni a 5 de alto, se pagina
     avail = h - top - (1 if gone or (show_all and everyone) else 0)
-    card_h = next((c for c in (8, 6, 5) if rows_needed * c <= avail), 5)
-    if rows_needed * card_h > avail:
+    if rows_needed * 5 > avail:
         avail = h - top - 1   # hará falta la nota de "+N más"
-    face_rows = card_h - 2
+    card_h = max(5, min(14, avail // rows_needed))
+    face_rows = 6 if card_h >= 8 else 4 if card_h >= 6 else 3
     fit = max(1, avail // card_h) * per_row
     first = max(0, idx - fit + 1) if idx is not None and idx >= fit else 0
     shown = agents[first:first + fit]
@@ -1626,14 +1647,23 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         rain(cv, top, now, h)
 
     gap = 2
-    cw = (w - gap * (per_row - 1)) // per_row
+    cw = (w - indent - gap * (per_row - 1)) // per_row
+    rows_shown = -(-len(shown) // per_row)
+    spare = max(0, avail - rows_shown * card_h)   # lo que sobra se lo lleva la última fila
+    if indent:   # guía tenue desde el lead hasta cada fila
+        mids = [top + r * card_h + card_h // 2 for r in range(rows_shown)]
+        for yy in range(top, mids[-1]):
+            cv.put(1, yy, "│", LINE)
+        for r, yy in enumerate(mids):
+            cv.put(1, yy, ("└" if r == rows_shown - 1 else "├") + "──", LINE)
     for n, v in enumerate(shown):
         row, col = divmod(n, per_row)
-        x, y = col * (cw + gap), top + row * card_h
+        x, y = indent + col * (cw + gap), top + row * card_h
+        this_h = card_h + (spare if row == rows_shown - 1 else 0)
         live, chosen = v["running"], v["id"] == sel
         failed = bool(v["end"]) and v["status"] != "completed"
         edge = "bold #ffffff" if chosen else ERR if failed else v["color"] if live else LINE
-        cv.box(x, y, cw, card_h, edge, heavy=chosen)
+        cv.box(x, y, cw, this_h, edge, heavy=chosen)
         show_face = cw >= 64
         fw = FACE_SIZE[face_rows][0] // 2
         if show_face:   # centrada en un hueco del mismo ancho para todas, sea cual sea su tamaño
@@ -1656,11 +1686,12 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         # a la derecha, su log, sobre fondo propio
         lx = ix + iw + 1
         if per_row == 1 and show_face:
-            lx = log_x   # el log de todos empieza en la misma columna que el del lead
+            lx = log_x + indent   # el log de todos empieza en la misma columna, corrida como la tarjeta
         if x + cw - 1 - lx >= 20:
             mine = recent.get(v["aid"], []) + recent.get(v["id"], [])
             mine.sort(key=lambda e: e[0])
-            mini_log(cv, lx, y + 1, x + cw - 1 - lx, card_h - 2, mine, v["color"] if live or chosen else blend(LINE, v["color"], 0.6))
+            mini_log(cv, lx, y + 1, x + cw - 1 - lx, this_h - 2, mine,
+                     v["color"] if live or chosen else blend(LINE, v["color"], 0.6), now, live=live)
     return cv.text()
 
 
