@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1197,45 +1197,78 @@ def hpath(x0, x1, y):
     return [(x, y) for x in range(x0, x1 + step, step)]
 
 
-# ── diseño "diagrama": el lead y su escuadrón de samuráis ─────────────────
+# ── diseño "diagrama": el lead y un rostro por subagente ────────────────
 
-HELMETS = ("╲▄██▄╱", "▲▄██▄▲", "╱▀██▀╲", "▄▟██▙▄", "┃▄██▄┃")   # kabuto: uno por tipo de subagente
-ARMORS = ("▟▓▓▓▓▙", "▟▓▒▒▓▙", "▟█▓▓█▙", "▟▒▓▓▒▙")
-STEEL = "#d7dde8"   # color de la katana
-BLOOD = "#ff2a3c"   # ojos encendidos
-BLADE = set("┃━╋╾╍")
-EYES = set("◣◢◆")
+# rostros de 8x4; "e" marca los ojos (u ópticas), que son lo único que se enciende
+FACES = (
+    ("oni", (" ▲▄▄▄▄▲ ", "▐█e▀▀e█▌", "▐▌▼▼▼▼▐▌", " ▀▚▄▄▞▀ "), "#ff2a3c"),
+    ("calavera", (" ▄████▄ ", "█▀e██e▀█", " ▀█▄▄█▀ ", "  ▐╪╪▌  "), "#ff2a3c"),
+    ("visor", (" ▄▀▀▀▀▄ ", "█▐eeee▌█", "█ ▄▄▄▄ █", " ▀▄██▄▀ "), "#00e5ff"),
+    ("respirador", (" ▄████▄ ", "▐e▀██▀e▌", "▐█▐╬╬▌█▌", " ▀█▀▀█▀ "), "#39ff14"),
+    ("cíclope", (" ▄▄▄▄▄▄ ", "█▓▓▐e▌ █", "█▓▓ ▀▀ █", " ▀▓▄▄▄▀ "), "#ff2a3c"),
+    ("kitsune", ("▲▄    ▄▲", "▐▀e▄▄e▀▌", " ▀▄▐▌▄▀ ", "   ▀▀   "), "#ff2bd6"),
+)
+LEAD_FACE = ("▲▄▄▄▄▲", "█e▀▀e█", " ▀▼▼▀ ")   # el lead: un oni de 3 líneas, cabe en su caja
 
 
-def samurai(v, phase, i):
-    """Figura de 4 líneas de un subagente; la pose dice qué está haciendo."""
-    seed = sum(map(ord, v["type"]))
-    helm, armor = HELMETS[seed % len(HELMETS)], ARMORS[(seed // 7) % len(ARMORS)]
+def eye_cells(lines):
+    return [(c, r) for r, line in enumerate(lines) for c, ch in enumerate(line) if ch == "e"]
+
+
+def light_eyes(lines, glyphs):
+    """Cambia cada "e" por el glifo que toca, en orden de lectura."""
+    it = iter(glyphs)
+    return ["".join(next(it, "·") if ch == "e" else ch for ch in line) for line in lines]
+
+
+def face(v, phase, i):
+    """Rostro de un subagente. Devuelve (líneas, celdas de los ojos, color de los ojos, fila con glitch)."""
+    _, lines, color = FACES[sum(map(ord, v["type"])) % len(FACES)]
+    cells = eye_cells(lines)
+    n = len(cells)
     failed = bool(v["end"]) and v["status"] != "completed"
+    glitch = None
     if v["running"]:
-        mask = " █▄▄█" if (phase + i * 11) % 41 == 0 else " █◣◢█"   # parpadeo: los ojos se cierran un instante
-        if v["tool"] and (phase // 4 + i) % 2:   # trabajando con una herramienta: tajo
-            return [helm, mask, f"{armor}━━━━", "▐▌  ▐▌"]
-        return [f"{helm} ┃", f"{mask}  ┃", f"{armor}━╋", "▐▌  ▐▌"]   # en guardia
-    if failed:   # máscara partida, de rodillas
-        return [helm[:3] + " " + helm[4:], " █x ▚", "▟▓▒░ ▙ ━ ╍", "▀▀  ▀▀"]
-    if v["end"]:
-        return [helm, " █▬▬█", f"{armor}╾─", "▐▌  ▐▌"]   # katana envainada, ojos cerrados
-    return [helm, " █··█", armor, "▀▀  ▀▀"]   # interrumpido: la armadura sin nadie dentro
+        if (phase + i * 11) % 41 == 0:   # parpadeo
+            glyphs = "▄" * n
+        elif n == 1:
+            glyphs = "●"
+        elif n == 2:
+            glyphs = "◣◢"   # cejas hacia el centro: mirada hostil
+        else:   # visor: un punto de luz que barre de lado a lado
+            at = (phase // 2 + i) % (2 * n - 2)
+            at = at if at < n else 2 * n - 2 - at
+            glyphs = "".join("█" if k == at else "▒" for k in range(n))
+        if v["tool"] and (phase + i * 5) % 7 < 2:   # usando una herramienta: la imagen se corrompe a ratos
+            glitch = (phase // 3 + i) % len(lines)
+    elif failed:
+        glyphs = "x" * n
+    elif v["end"]:
+        glyphs = "▬" * n
+    else:
+        glyphs = "·" * n
+    lines = light_eyes(lines, glyphs)
+    if failed:   # rostro roto: una grieta y la mitad derecha deshecha
+        crack = {0: "╻", 1: "╳", 2: "╲", 3: "╲"}
+        lines = ["".join(crack[r] if c == 4 + r // 2 and ch != " " and (c, r) not in cells else
+                         {"█": "▒", "▓": "░", "▄": "░", "▀": "░"}.get(ch, ch) if c > 4 else ch
+                         for c, ch in enumerate(line)) for r, line in enumerate(lines)]
+    if glitch is not None:
+        lines[glitch] = " " + lines[glitch][:-1]
+        cells = [(c + 1 if r == glitch else c, r) for c, r in cells]
+    return lines, cells, color, glitch
 
 
 def lead_face(state, phase):
-    eyes = {"busy": "█▄▼▄█" if phase % 37 == 0 else "█◣▼◢█", "waiting": "█◆▼◆█",
-            "idle": "█▬▼▬█", "ended": "█·▼·█"}.get(state, "█◣▼◢█")
-    return ["▲▄█▄▲", eyes, "▟▓▓▓▙"]
+    glyphs = {"busy": "▄▄" if phase % 37 == 0 else "◣◢", "waiting": "◆◆", "idle": "▬▬", "ended": "··"}.get(state, "◣◢")
+    return light_eyes(LEAD_FACE, glyphs), eye_cells(LEAD_FACE)
 
 
-def put_figure(cv, x, y, lines, body, steel=STEEL, eyes=None):
+def put_figure(cv, x, y, lines, body, cells=(), eyes=None, glitch=None, accent=None):
     for r, line in enumerate(lines):
-        cv.put(x, y + r, line, body)
-        cv.tint([(x + c, y + r) for c, ch in enumerate(line) if ch in BLADE], f"bold {steel}")
-        if eyes:
-            cv.tint([(x + c, y + r) for c, ch in enumerate(line) if ch in EYES], eyes)
+        cv.put(x, y + r, line, accent if r == glitch and accent else body)
+    if eyes:
+        cv.tint([(x + c, y + r) for c, r in cells], eyes)
 
 
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
@@ -1268,10 +1301,12 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     lw = w - lx
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
     cv.box(lx, 0, lw, 5, lst)
-    put_figure(cv, lx + 2, 1, lead_face(state, phase), f"bold {lst}",
-               eyes=f"bold {breath(WAIT, now)}" if state == "waiting" else f"bold {breath(BLOOD, now)}")
-    tx = lx + 9
-    inner = lw - 11
+    lines, cells = lead_face(state, phase)
+    lit = WAIT if state == "waiting" else FACES[0][2] if state in ("busy", "idle") else None
+    put_figure(cv, lx + 2, 1, lines, blend(LINE, lst, 0.6), cells,
+               eyes=f"bold {breath(lit, now)}" if lit else None)
+    tx = lx + 10
+    inner = lw - 12
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
@@ -1328,8 +1363,8 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
         if idle_rain == "force" or (idle_rain and not everyone):
             rain(cv, 6, now)
         mid = w // 2
-        put_figure(cv, mid - 3, 7, ["╲▄██▄╱", " █▬▬█", "▟▓▓▓▓▙", "▀▀▀▀▀▀"], LINE)
-        msg = "el dojo espera · los subagentes aparecen aquí a medida que el lead los invoca"
+        put_figure(cv, mid - 4, 7, light_eyes(FACES[2][1], "····"), LINE)
+        msg = "sin subagentes · sus rostros aparecen aquí a medida que el lead los invoca"
         msg = trunc(msg, w - 2)
         cv.put(max(0, mid - len(msg) // 2), 11, msg, DIM)
         return cv.text()
@@ -1369,11 +1404,14 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
             cv.put(cx, y - 2, "┬", LINE)
             cv.put(cx, y - 1, "│", LINE)
             cv.put(cx, y, "┴", LINE)
-        body = SWARM if live else ERR if failed else TOOL if v["end"] else DIM
-        body = blend(LINE, SWARM, 0.55) if live and not chosen else body   # la armadura oscura, los ojos y el acero brillan
-        put_figure(cv, x + 2, y + 1, samurai(v, phase, n), f"bold {body}" if chosen else body,
-                   steel=STEEL if live else DIM, eyes=f"bold {breath(BLOOD, now, n * 0.7)}" if live else None)
-        ix, inner = x + 13, sw - 15
+        # el rostro queda en penumbra; solo se encienden los ojos
+        lines, cells, lit, glitch = face(v, phase, n)
+        body = blend(LINE, SWARM, 0.55) if live else blend(LINE, ERR, 0.6) if failed else LINE
+        put_figure(cv, x + 2, y + 1, lines, f"bold {body}" if chosen else body, cells,
+                   eyes=f"bold {breath(lit, now, n * 0.7)}" if live else f"bold {ERR}" if failed
+                   else blend(LINE, lit, 0.35) if v["end"] else None,
+                   glitch=glitch, accent=blend(LINE, lit, 0.7))
+        ix, inner = x + 12, sw - 14
         icon, ist = agent_icon(v, phase, n)
         cv.put(ix, y + 1, icon, ist)
         head = v["type"] + (f" · {v['model']}" if v["model"] else "")

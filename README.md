@@ -58,13 +58,13 @@ Las principales:
 
 `d` alterna el panel de agentes entre cinco diseños: `lista`, `tabla`,
 `tarjetas`, `tiempo` y `diagrama`. En `diagrama` cada subagente es una tarjeta
-con un samurái acorazado que cuelga del lead. Las tarjetas aparecen a medida
+con un rostro cyberpunk que cuelga del lead: oni, calavera, visor, respirador,
+cíclope o kitsune, uno por tipo de subagente. Las tarjetas aparecen a medida
 que el lead crea subagentes, sin casillas vacías, y caben en una o dos filas
-según la altura. Cada tipo de subagente lleva su propio casco. Mientras trabaja,
-la armadura queda en penumbra y solo brillan los ojos, en rojo, y el acero: en
-guardia mientras piensa, lanzando tajos mientras usa una herramienta. Al
-terminar envaina la katana y cierra los ojos; si falla, cae de rodillas con la
-máscara partida. Sin subagentes, una armadura vacía espera en el dojo.
+según la altura. El rostro queda en penumbra y solo se encienden los ojos: en
+rojo, cian, verde ácido o magenta mientras trabaja, con la imagen corrompida a
+ratos cuando usa una herramienta. Al terminar, los ojos se apagan en una línea;
+si falla, el rostro se agrieta y los ojos quedan en `x`.
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
 prompt) o, si no hay ninguno, la actividad de la sesión: porcentaje de la
