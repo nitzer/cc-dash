@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.32.0"
+__version__ = "0.32.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2049,7 +2049,7 @@ def session_card(store, s, now):
     """Tarjeta de color con todos los datos de la sesión bajo el cursor. Devuelve (panel, alto)."""
     state = store.state(s)
     live = store.live.get(s.sid) or {}
-    label, color = {"waiting": "◆ te espera", "busy": "● trabajando", "idle": "○ esperando",
+    badge, color = {"waiting": "◆ te espera", "busy": "● trabajando", "idle": "○ esperando",
                     "ended": "· cerrada"}[state], state_color(state)
     width = 30
     rows = []
@@ -2089,9 +2089,9 @@ def session_card(store, s, now):
     row("id", s.sid[:8])
 
     t = Text(no_wrap=True, overflow="ellipsis")
-    name = trunc(store.name(s), width - len(label) - 1)
+    name = trunc(store.name(s), width - len(badge) - 1)
     t.append(name, style="bold")
-    t.append(" " * max(1, width - len(name) - len(label)) + label + "\n", style=f"bold {color}")
+    t.append(" " * max(1, width - len(name) - len(badge)) + badge + "\n", style=f"bold {color}")
     t.append(trunc(s.title or "sin título", width) + "\n", style=FG)
     for n, (key, value) in enumerate(rows):
         t.append(f"{key:<10}", style=DIM)
