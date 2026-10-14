@@ -129,14 +129,13 @@ diseño `diagrama` van debajo de su rostro:
 - **LV**: cada 10 rondas sube un nivel. La barra de LV muestra cuánto falta
   para la próxima evolución.
 - **XP**: las rondas del nivel actual, de 0 a 10 (`XP ▰▰▰▱▱▱▱▱ 3/10`).
-- **Evolución**: cada 10 niveles (100 rondas) el rostro mejora. EVO I suma una
-  cresta, EVO II implantes que brillan con los ojos, EVO III un halo y EVO MAX
-  brillos dorados. Cada evolución se anuncia con un toast.
+- **Evolución**: al subir suficientes niveles, el rostro evoluciona. Cuándo y
+  qué gana es una sorpresa; cada evolución se anuncia con un toast.
 
 **`L`** abre la ventana de evoluciones: un rostro por vez, en grande y
 animado. `h`/`l` cambian de personaje, `j`/`k` bajan o suben de evolución, y
-la escalera de la derecha dice qué niveles abarca cada una y qué gana el
-rostro. Abajo indica qué tipos de subagente de la sesión llevan ese rostro.
+la escalera dice qué gana el rostro en cada una. Las evoluciones que ningún
+subagente de la sesión ha alcanzado salen como `???` y no se pueden ver. Abajo indica qué tipos de subagente de la sesión llevan ese rostro.
 Si hay un subagente seleccionado, la ventana abre en su rostro y su evolución.
 
 El número exacto de rondas aparece junto al agente (`23 rondas`) y en el

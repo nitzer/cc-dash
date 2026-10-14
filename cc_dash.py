@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.41.3"
+__version__ = "0.41.4"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1537,10 +1537,17 @@ EVO_GAIN = ("el rostro de partida", "una cresta en punta sobre la frente",
             "brillos dorados en lugar de cian")
 
 
+def reached_tier(store, focus, k):
+    """La evolución más alta que alcanzó en la sesión un subagente con el rostro k; las demás son sorpresa."""
+    return max((agent_game(v)["tier"] for v in (store.agents(focus) if focus else [])
+                if sum(map(ord, v["type"])) % len(FACES) == k), default=0)
+
+
 def gallery_panel(view, store, focus, now, width, max_rows=40):
     """Ventana de evoluciones (tecla L): un personaje por vez, con h/l y j/k."""
     k = view["face"] % len(FACES)
-    tier = max(0, min(4, view["tier"]))
+    top = reached_tier(store, focus, k)
+    tier = view["tier"] = max(0, min(top, view["tier"]))
     name, fn = FACES[k]
     color = AGENT_COLORS[k % len(AGENT_COLORS)]
     v = {"type": name, "color": color, "running": True, "tool": None, "end": None, "status": ""}
@@ -1562,15 +1569,16 @@ def gallery_panel(view, store, focus, now, width, max_rows=40):
             body.append(ch, style=style or None)
         body.append("\n")
     body.append("\n")
-    for t in range(4, -1, -1):   # la escalera de evoluciones, la más alta arriba
-        lo = max(1, t * 10)
-        span = f"LV {lo}+" if t == 4 else f"LV {lo}–{t * 10 + 9}"
+    for t in range(4, -1, -1):   # la escalera de evoluciones, la más alta arriba; sin niveles: es sorpresa
         picked = t == tier
         line = Text(no_wrap=True)
         line.append(" ▸ " if picked else "   ", style=f"bold {color}")
-        line.append(f"{EVO[t] or 'BASE':<8}", style=f"bold {color}" if picked else FG if t < tier else DIM)
-        line.append(f"{span:<11}", style=FG if picked else DIM)
-        line.append(EVO_GAIN[t], style=FG if picked else DIM)
+        if t > top:
+            line.append(f"{'???':<9}", style=LINE)
+            line.append("aún sin descubrir", style=LINE)
+        else:
+            line.append(f"{EVO[t] or 'BASE':<9}", style=f"bold {color}" if picked else FG if t < tier else DIM)
+            line.append(EVO_GAIN[t], style=FG if picked else DIM)
         body.append_text(line)
         body.append("\n")
     users = sorted({v2["type"] for v2 in (store.agents(focus) if focus else [])
@@ -3983,10 +3991,12 @@ def run(accounts, once, cfg):
                         break
                     elif keys in (b"l", b"\x1b[C"):
                         gv["face"] = (gv["face"] + 1) % len(FACES)
+                        gv["tier"] = 4   # abre en la evolución más alta descubierta
                     elif keys in (b"h", b"\x1b[D"):
                         gv["face"] = (gv["face"] - 1) % len(FACES)
+                        gv["tier"] = 4   # abre en la evolución más alta descubierta
                     elif keys in (b"k", b"\x1b[A"):
-                        gv["tier"] = min(4, gv["tier"] + 1)
+                        gv["tier"] = min(reached_tier(store, focus, gv["face"] % len(FACES)), gv["tier"] + 1)
                     elif keys in (b"j", b"\x1b[B"):
                         gv["tier"] = max(0, gv["tier"] - 1)
                     continue
