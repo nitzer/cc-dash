@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.41.0"
+__version__ = "0.41.2"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1592,19 +1592,27 @@ def meter(value, total, width, color, empty=None):
 
 
 def stat_rows(g, color, n, now):
-    """Las barras que van bajo el rostro: HP, nivel (hacia la próxima evolución) y XP (rondas del nivel)."""
+    """Las barras que van bajo el rostro: HP, nivel (hacia la próxima evolución) y XP (rondas del nivel).
+
+    Siempre las mismas columnas, con las cifras alineadas a la derecha para que no se peguen ni bailen."""
+    hp, lvl, xp = g["hp"], g["lvl"], g["xp"]
+    hpc = f"bold {breath(ERR, now * 2)}" if hp <= 10 else hp_color(hp)
+    if n >= 3:
+        return [[("HP ", DIM), *meter(hp, 100, 8, hpc), (f" {f'{hp}%':>4}", hpc)],
+                [("LV ", DIM), *meter(lvl % 10, 10, 8, color), (f" {lvl:>4}", f"bold {color}")],
+                [("XP ", DIM), *meter(xp, 10, 8, HIGHLIGHT), (f" {f'{xp}/10':>4}", HIGHLIGHT)]]
+    if n == 2:
+        return [[("HP ", DIM), *meter(hp, 100, 8, hpc), (f" {f'{hp}%':>4}", hpc)],
+                [("LV", DIM), (f"{lvl:>3}", f"bold {color}"), ("   XP", DIM), (f"{f'{xp}/10':>6}", HIGHLIGHT)]]
+    return [compact_stats(g, color, now)]
+
+
+def compact_stats(g, color, now):
+    """HP, nivel y XP en una línea de 17 columnas fijas: «HP  53% LV  6 XP3»."""
     hp = g["hp"]
     hpc = f"bold {breath(ERR, now * 2)}" if hp <= 10 else hp_color(hp)
-    rows = [[("HP ", DIM), *meter(hp, 100, 8, hpc), (f" {hp}%", hpc)],
-            [("LV ", DIM), (f"{g['lvl']:<3}", f"bold {color}"), *meter(g["lvl"] % 10, 10, 10, color)],
-            [("XP ", DIM), *meter(g["xp"], 10, 8, HIGHLIGHT), (f" {g['xp']}/10", HIGHLIGHT)]]
-    if n >= 3:
-        return rows
-    if n == 2:
-        return [rows[0], [("LV", DIM), (f"{g['lvl']} ", f"bold {color}"), ("XP ", DIM),
-                          *meter(g["xp"], 10, 5, HIGHLIGHT), (f" {g['xp']}/10", HIGHLIGHT)]]
-    return [[("HP", DIM), (f"{hp}% ", hpc), ("LV", DIM), (f"{g['lvl']} ", f"bold {color}"),
-             ("XP", DIM), (f"{g['xp']}", HIGHLIGHT)]]
+    return [("HP", DIM), (f"{hp:>4}% ", hpc), ("LV", DIM), (f"{g['lvl']:>3} ", f"bold {color}"),
+            ("XP", DIM), (f"{g['xp']}", HIGHLIGHT)]
 
 
 def put_stats(cv, x, y, rows):
@@ -1652,41 +1660,43 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     lg = lead_game(s)
     cv.box(0, 0, w, lead_h, lst)
     # todas las filas comparten columnas: hueco fijo para el rostro y sus barras, luego el texto
-    slot = 16
+    slot = 17
     tx = 2 + slot + 2
-    put_cells(cv, 2 + (slot - 6) // 2, 1, lead_face(state, now, lg["tier"]))
-    put_stats(cv, 2, 4, stat_rows(lg, lst if state != "ended" else DIM, stat_n, now))
-    iw = w - tx - 2
+    # el rostro, las barras y el texto del lead en las mismas columnas que los de los subagentes
+    put_cells(cv, indent + 2 + (slot - 6) // 2, 1, lead_face(state, now, lg["tier"]))
+    put_stats(cv, indent + 2, 4, stat_rows(lg, lst if state != "ended" else DIM, stat_n, now))
+    ltx = indent + tx
+    iw = w - ltx - 2
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
-    cv.put(tx, 1, trunc(who, max(0, iw - len(right) - 2)), f"bold {lst}")
-    cv.put(tx + iw - len(right), 1, right, f"bold {lst}")
+    cv.put(ltx, 1, trunc(who, max(0, iw - len(right) - 2)), f"bold {lst}")
+    cv.put(ltx + iw - len(right), 1, right, f"bold {lst}")
     stats = f"{s.tools} tools · salida {ktok(s.out_tokens)}"
     if s.cost is not None:
         stats += f" · ${s.cost:.2f}"
     if s.advisor:
         stats += f" · advisor {short_model(s.advisor)}" + (f" ×{s.advisor_calls}" if s.advisor_calls else "")
-    cv.put(tx, 2, trunc(stats, iw), DIM)
+    cv.put(ltx, 2, trunc(stats, iw), DIM)
     why = store.stuck(s, now)
     plain = list(s.pending.values())
     if state == "waiting":
         doc = f" · D abre {os.path.basename(s.docs[-1])}" if s.docs else ""
-        cv.put(tx, 3, trunc(f"◆ necesita {store.waiting_for(s)}{doc}", iw), f"bold {breath(WAIT, now)}")
+        cv.put(ltx, 3, trunc(f"◆ necesita {store.waiting_for(s)}{doc}", iw), f"bold {breath(WAIT, now)}")
     elif why:
-        cv.put(tx, 3, trunc("⚠ posible atasco: " + " · ".join(why), iw), f"bold {breath(ERR, now)}")
+        cv.put(ltx, 3, trunc("⚠ posible atasco: " + " · ".join(why), iw), f"bold {breath(ERR, now)}")
     elif plain and state != "ended":
         name, lab, _ = max(plain, key=lambda p: p[2])
         more = f" (+{len(plain) - 1})" if len(plain) > 1 else ""
-        cv.put(tx, 3, trunc(f"▶ {name}{more}: {lab}", iw), TOOL)
+        cv.put(ltx, 3, trunc(f"▶ {name}{more}: {lab}", iw), TOOL)
     else:
-        cv.put(tx, 3, trunc(s.title or "—", iw), DIM)
+        cv.put(ltx, 3, trunc(s.title or "—", iw), DIM)
     level = f"{lg['rounds']} ronda{'s' if lg['rounds'] != 1 else ''} · nivel {lg['lvl']}, sube en {10 - lg['xp']}"
     level += f" · {EVO[lg['tier']]}" if lg["tier"] else f" · evoluciona en el nivel {(lg['lvl'] // 10 + 1) * 10}"
     if stat_n >= 2:
-        cv.put(tx, 4, trunc(level, iw), DIM)
+        cv.put(ltx, 4, trunc(level, iw), DIM)
     if stat_n >= 3:
-        cv.put(tx, 5, trunc(f"HP = contexto libre: {lg['hp']}%" + (f" de {ktok(s.window())}" if s.ctx else ""), iw), DIM)
+        cv.put(ltx, 5, trunc(f"HP = contexto libre: {lg['hp']}%" + (f" de {ktok(s.window())}" if s.ctx else ""), iw), DIM)
 
     # ── una fila por subagente ──
     top = lead_h
@@ -1859,10 +1869,11 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     else:
         cv.put(0, 1, trunc(s.title or "—", w), DIM)
     g = lead_game(s)
-    x = segs(cv, 0, 2, [("HP ", DIM), *meter(g["hp"], 100, 8, hp_color(g["hp"])), (f" {g['hp']}%  ", hp_color(g["hp"])),
-                        ("LV ", DIM), (f"{g['lvl']} ", f"bold {color}"), *meter(g["lvl"] % 10, 10, 10, color),
-                        ("  XP ", DIM), *meter(g["xp"], 10, 8, HIGHLIGHT), (f" {g['xp']}/10", HIGHLIGHT),
-                        (f"  {g['rounds']} rondas", DIM)])
+    hp_v, xp_v = f"{g['hp']}%", f"{g['xp']}/10"
+    x = segs(cv, 0, 2, [("HP ", DIM), *meter(g["hp"], 100, 8, hp_color(g["hp"])), (f" {hp_v:>4}   ", hp_color(g["hp"])),
+                        ("LV ", DIM), *meter(g["lvl"] % 10, 10, 8, color), (f" {g['lvl']:>4}   ", f"bold {color}"),
+                        ("XP ", DIM), *meter(g["xp"], 10, 8, HIGHLIGHT), (f" {xp_v:>5}", HIGHLIGHT),
+                        (f"   {g['rounds']} rondas", DIM)])
     extra = [f"salida {ktok(s.out_tokens)}"]
     if s.cache_pct is not None:
         extra.append(f"caché {s.cache_pct}%")
@@ -1957,11 +1968,12 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
     if layout == "tabla":
         shown = pick(agents, max(1, h - y - 2), sel)
         agents_header(cv, y, w, everyone, agents, shown, w)
-        flex = max(20, w - 4 - 12 - 11 - 7 - 6)
+        flex = max(20, w - 4 - 12 - 11 - 7 - 6 - 17)
         c_task, c_now = flex // 2, flex - flex // 2
         cols = [(4, "TIPO", 12), (16, "MODELO", 11), (27, "TAREA", c_task), (27 + c_task, "AHORA", c_now)]
         for x, name, _ in cols:
             cv.put(x, y + 1, name, DIM)
+        cv.put(w - 30, y + 1, " HP  LV    XP", DIM)
         cv.put(w - 12, y + 1, "TIEMPO TOOLS", DIM)
         for i, v in enumerate(shown):
             row, chosen = y + 2 + i, v["id"] == sel
@@ -1976,6 +1988,9 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
             cv.put(16, row, trunc(v["model"] or "—", 10), base + bg)
             cv.put(27, row, trunc(v["desc"], c_task - 1), base + bg)
             cv.put(27 + c_task, row, trunc(text, c_now - 1), tst + bg)
+            g = agent_game(v)
+            segs(cv, w - 30, row, [(f"{g['hp']:>3}%", hp_color(g["hp"]) + bg), (f"{g['lvl']:>4}", f"bold {v['color']}" + bg),
+                                   (f"{g['xp']:>3}/10", HIGHLIGHT + bg)])
             cv.put(w - 12, row, f"{agent_time(v, now):>6} {v['tools']:>5}", base + bg)
         if not shown:
             cv.put(2, y + 2, empty, DIM)
@@ -2056,8 +2071,11 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
             time_bar(cv, bx, row, bw, t0, t1, v["start"], v["end"], agent_bar_style(v, now), v["running"])
             text, tst = agent_now(v)
             tail = f" · {n_tools(v['tools'])} · {agent_time(v, now)}"
-            cv.put(x, row + 1, trunc(text, max(0, w - x - len(tail))), tst)
-            cv.put(x + len(trunc(text, max(0, w - x - len(tail)))), row + 1, tail, DIM)
+            room = max(0, bx - x - len(tail) - 2)
+            cv.put(x, row + 1, trunc(text, room), tst)
+            cv.put(x + len(trunc(text, room)), row + 1, tail, DIM)
+            # HP / LV / XP en la misma columna para todos, bajo la barra de tiempo
+            segs(cv, bx, row + 1, compact_stats(agent_game(v), v["color"] if v["running"] else DIM, now))
         if not shown:
             cv.put(2, y + 2, empty, DIM)
     if idle_rain == "force":
