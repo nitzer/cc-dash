@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.39.0"
+__version__ = "0.40.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -128,7 +128,8 @@ FRESH = 4            # segundos que dura el efecto de una tarea recién terminad
 NEWS = {"wait": ("◆", "te espera", "WAIT", True), "stuck": ("⚠", "posible atasco", "ERR", True),
         "fail": ("✗", "falló una tarea", "ERR", True), "job": ("✓", "comando terminado", "SWARM", False), "done": ("■", "turno terminado", "TOOL", True),
         "cheat": ("★", "truco activado", "WAIT", False),
-        "task": ("✓", "tarea terminada", "TOOL", False), "agent": ("✓", "subagente terminado", "SWARM", False)}
+        "task": ("✓", "tarea terminada", "TOOL", False), "agent": ("✓", "subagente terminado", "SWARM", False),
+        "evo": ("★", "evolucionó", "WAIT", False)}
 CHEATS = ("iddqd", "idkfa")   # sí, esos
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
 SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
@@ -534,7 +535,7 @@ class Session:
                                           "out": 0, "done": None, "model": "", "last": 0.0,
                                           "beats": deque(maxlen=600), "tool_counts": Counter(),
                                           "skills": Counter(), "mcp": Counter(), "edits": Counter(),
-                                          "reads": set(), "errors": 0})
+                                          "reads": set(), "errors": 0, "rids": set(), "ctx": 0})
 
     def progress(self):
         """(hechas, total, texto de la tarea en curso) de la lista de tareas, o None si no hay."""
@@ -943,7 +944,12 @@ class Store:
         info["last"] = max(info["last"], ts)
         if msg.get("model"):
             info["model"] = msg["model"]
-        self.add_usage(s, o, msg, info)
+        if o.get("requestId"):
+            info["rids"].add(o["requestId"])   # cada llamada al modelo es una ronda del subagente
+        usage = self.add_usage(s, o, msg, info)
+        if usage:
+            info["ctx"] = ((usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0)
+                           + (usage.get("cache_creation_input_tokens") or 0)) or info["ctx"]
         for b in content if isinstance(content, list) else []:
             if not isinstance(b, dict):
                 continue
@@ -1031,6 +1037,7 @@ class Store:
                 "color": AGENT_COLORS[n % len(AGENT_COLORS)],   # por orden de creación: no cambia
                 "beats": side.get("beats") or (),
                 "side": side,   # actividad propia: herramientas, archivos, skills, errores
+                "rounds": len(side.get("rids") or ()), "ctx": side.get("ctx", 0),
                 "model": a["model"] or (short_model(side["model"]) if side.get("model") else ""),
                 "status": a["status"] or ("completed" if end else ""),
                 "response": (side.get("final") or a["result"] or side.get("text") or "").strip(),
@@ -1292,6 +1299,7 @@ def hpath(x0, x1, y):
 # cada píxel (0 negro, 1 brillo, EYE ojo encendido, None fondo). Una celda de braille
 # son 2x4 píxeles, así que un rostro de 6 filas tiene 24x24 píxeles.
 EYE = -1.0
+IMPLANT = -2.0   # píxel que brilla como los ojos: los implantes de la segunda evolución
 BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
 DOTS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
 HIGHLIGHT = "#d1f7ff"   # el brillo cian pálido de la piel / el metal
@@ -1390,13 +1398,31 @@ FACE_SIZE = {6: (24, 24), 4: (20, 16), 3: (12, 12)}   # filas -> píxeles (ancho
 _face_px = {}
 
 
-def face_pixels(fn, rows):
-    """Píxeles de un rostro a un tamaño; se calculan una sola vez."""
-    key = (fn, rows)
+def face_pixels(fn, rows, tier=0):
+    """Píxeles de un rostro a un tamaño y nivel de evolución; se calculan una sola vez.
+
+    Cada evolución le suma algo: I una cresta, II implantes en las mejillas, III un halo."""
+    key = (fn, rows, tier)
     if key not in _face_px:
         w, h = FACE_SIZE[rows]
-        _face_px[key] = [[fn(((x + 0.5) / w * 2 - 1) * 1.05, ((y + 0.5) / h * 2 - 1) * 1.05)
-                          for x in range(w)] for y in range(h)]
+        px = [[fn(((x + 0.5) / w * 2 - 1) * 1.05, ((y + 0.5) / h * 2 - 1) * 1.05)
+               for x in range(w)] for y in range(h)]
+        cx = (w - 1) / 2
+        if tier >= 1:   # cresta en punta sobre la frente
+            for y in range(max(2, h // 5)):
+                for x in range(w):
+                    if abs(x - cx) <= 0.5 + y * 0.6:
+                        px[y][x] = 1.0
+        if tier >= 2:   # implantes: dos líneas que brillan como los ojos, en las mejillas
+            for y in range(int(h * 0.45), int(h * 0.8)):
+                for x in (round(w * 0.14), round(w * 0.86) - 1):
+                    if px[y][x] not in (None, EYE):
+                        px[y][x] = IMPLANT
+        if tier >= 3:   # halo de puntos sobre la cabeza
+            for x in range(1, w - 1, 2):
+                if px[0][x] is None:
+                    px[0][x] = 0.9
+        _face_px[key] = px
     return _face_px[key]
 
 
@@ -1417,6 +1443,12 @@ def dither(px, palette, eyes, scan=None, crack=False):
                     val = px[y][x]
                     if crack and abs(x - (w // 2 + (y - h // 2) // 3)) < 1:
                         continue
+                    if val == IMPLANT:   # implantes: brillan con los ojos, también en un visor
+                        if eyes is not None:
+                            bits |= DOTS[dx][dy]
+                            eye = True
+                            continue
+                        val = 0.5
                     if val == EYE:
                         if eyes is not None and (scan is None or abs(x - scan) <= 2):
                             bits |= DOTS[dx][dy]
@@ -1441,15 +1473,15 @@ def eye_color(color):
     return "#00f0ff" if r > 200 and g < 140 else BLOOD
 
 
-def agent_face(v, phase, i, now, rows):
+def agent_face(v, phase, i, now, rows, tier=0):
     """Rostro tramado de un subagente, en su color; la expresión dice cómo va."""
     _, fn = FACES[sum(map(ord, v["type"])) % len(FACES)]
-    px = face_pixels(fn, rows)
+    px = face_pixels(fn, rows, tier)
     color = v["color"]
     failed = bool(v["end"]) and v["status"] != "completed"
     scan = None
     if v["running"]:
-        palette = (blend(LINE, color, 0.5), color, HIGHLIGHT)
+        palette = (blend(LINE, color, 0.5), color, "#ffd75e" if tier >= 4 else HIGHLIGHT)   # EVO MAX: brillos dorados
         k = (1 - math.cos(2 * math.pi * (now + i * 0.7) / 1.6)) / 2
         glow = eye_color(color)
         eyes = None if (phase + i * 11) % 41 == 0 else f"bold {blend(glow, '#ffffff', 0.5 * k)}"
@@ -1472,8 +1504,8 @@ def agent_face(v, phase, i, now, rows):
     return cells
 
 
-def lead_face(state, now):
-    px = face_pixels(_oni, 3)
+def lead_face(state, now, tier=0):
+    px = face_pixels(_oni, 3, tier)
     if state == "ended":
         return dither(px, (LINE, LINE, blend(LINE, FG, 0.3)), None)
     k = (1 - math.cos(2 * math.pi * now / 1.6)) / 2
@@ -1482,6 +1514,54 @@ def lead_face(state, now):
 
 
 BLOOD = "#ff2a3c"
+
+
+def game(rounds, ctx, window):
+    """HP = contexto libre; cada 10 rondas sube un nivel; cada 10 niveles el rostro evoluciona."""
+    used = min(100, round(100 * ctx / window)) if ctx and window else 0
+    lvl = rounds // 10 + 1
+    return {"hp": 100 - used, "lvl": lvl, "xp": rounds % 10, "rounds": rounds, "tier": min(4, lvl // 10)}
+
+
+def lead_game(s):
+    return game(s.turns, s.ctx, s.window())
+
+
+def agent_game(v):
+    return game(v["rounds"], v["ctx"], 1_000_000 if v["ctx"] > 200_000 else 200_000)
+
+
+EVO = ("", "EVO I", "EVO II", "EVO III", "EVO MAX")
+
+
+def hp_color(hp):
+    return TOOL if hp > 50 else WAIT if hp > 20 else ERR
+
+
+def meter(value, total, width, color, empty=None):
+    fill = round(width * value / total) if total else 0
+    return [("▰" * fill, color), ("▱" * (width - fill), empty or LINE)]
+
+
+def stat_rows(g, color, n, now):
+    """Las barras que van bajo el rostro: HP, nivel (hacia la próxima evolución) y XP (rondas del nivel)."""
+    hp = g["hp"]
+    hpc = f"bold {breath(ERR, now * 2)}" if hp <= 10 else hp_color(hp)
+    rows = [[("HP ", DIM), *meter(hp, 100, 8, hpc), (f" {hp}%", hpc)],
+            [("LV ", DIM), (f"{g['lvl']:<3}", f"bold {color}"), *meter(g["lvl"] % 10, 10, 10, color)],
+            [("XP ", DIM), *meter(g["xp"], 10, 8, HIGHLIGHT), (f" {g['xp']}/10", HIGHLIGHT)]]
+    if n >= 3:
+        return rows
+    if n == 2:
+        return [rows[0], [("LV", DIM), (f"{g['lvl']} ", f"bold {color}"), ("XP ", DIM),
+                          *meter(g["xp"], 10, 5, HIGHLIGHT), (f" {g['xp']}/10", HIGHLIGHT)]]
+    return [[("HP", DIM), (f"{hp}% ", hpc), ("LV", DIM), (f"{g['lvl']} ", f"bold {color}"),
+             ("XP", DIM), (f"{g['xp']}", HIGHLIGHT)]]
+
+
+def put_stats(cv, x, y, rows):
+    for r, parts in enumerate(rows):
+        segs(cv, x, y + r, parts)
 
 
 def put_cells(cv, x, y, cells):
@@ -1506,22 +1586,35 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     activity_graph(cv, h - gh, w, gh, s, everyone, now, focus=focus)
     h -= gh
 
+    # ── tamaños: rostro y barras bajo el rostro, lo más grande con lo que quepan todos ──
+    indent = 4 if w >= 90 else 0   # los subagentes cuelgan un poco a la derecha del lead
+    gone = len(everyone) - len(agents)
+    idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
+    per_row = 2 if w >= 170 else 1
+    rows_needed = max(1, -(-len(agents) // per_row)) if agents else 0
+    reserve = 1 if gone or (show_all and everyone) else 0
+    options = ((6, 3), (4, 3), (3, 3), (3, 2), (3, 1))
+    face_rows, stat_n = next(((f, n) for f, n in options
+                              if (5 + n) + rows_needed * (f + n + 2) <= h - reserve), options[-1])
+    lead_h = 2 + 3 + stat_n
+    card_h = face_rows + stat_n + 2
+
     # ── fila del lead ──
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
-    cv.box(0, 0, w, 5, lst)
-    # todas las filas comparten columnas: hueco fijo para la cara, luego el texto y luego el log
-    slot = 12
+    lg = lead_game(s)
+    cv.box(0, 0, w, lead_h, lst)
+    # todas las filas comparten columnas: hueco fijo para el rostro y sus barras, luego el texto
+    slot = 16
     tx = 2 + slot + 2
-    put_cells(cv, 2 + (slot - 6) // 2, 1, lead_face(state, now))
+    put_cells(cv, 2 + (slot - 6) // 2, 1, lead_face(state, now, lg["tier"]))
+    put_stats(cv, 2, 4, stat_rows(lg, lst if state != "ended" else DIM, stat_n, now))
     iw = w - tx - 2
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
     cv.put(tx, 1, trunc(who, max(0, iw - len(right) - 2)), f"bold {lst}")
     cv.put(tx + iw - len(right), 1, right, f"bold {lst}")
-    stats = f"{s.turns} turnos · {s.tools} tools · salida {ktok(s.out_tokens)}"
-    if s.ctx:
-        stats += f" · contexto {min(100, round(100 * s.ctx / s.window()))}%"
+    stats = f"{s.tools} tools · salida {ktok(s.out_tokens)}"
     if s.cost is not None:
         stats += f" · ${s.cost:.2f}"
     if s.advisor:
@@ -1540,20 +1633,18 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.put(tx, 3, trunc(f"▶ {name}{more}: {lab}", iw), TOOL)
     else:
         cv.put(tx, 3, trunc(s.title or "—", iw), DIM)
+    level = f"{lg['rounds']} ronda{'s' if lg['rounds'] != 1 else ''} · nivel {lg['lvl']}, sube en {10 - lg['xp']}"
+    level += f" · {EVO[lg['tier']]}" if lg["tier"] else f" · evoluciona en el nivel {(lg['lvl'] // 10 + 1) * 10}"
+    if stat_n >= 2:
+        cv.put(tx, 4, trunc(level, iw), DIM)
+    if stat_n >= 3:
+        cv.put(tx, 5, trunc(f"HP = contexto libre: {lg['hp']}%" + (f" de {ktok(s.window())}" if s.ctx else ""), iw), DIM)
 
     # ── una fila por subagente ──
-    top = 5
-    indent = 4 if w >= 90 else 0   # los subagentes cuelgan un poco a la derecha del lead
-    gone = len(everyone) - len(agents)
-    idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
-    per_row = 2 if w >= 170 else 1
-    rows_needed = max(1, -(-len(agents) // per_row))
-    # las filas se reparten todo el alto que queda; si no caben ni a 5 de alto, se pagina
-    avail = h - top - (1 if gone or (show_all and everyone) else 0)
-    if rows_needed * 5 > avail:
+    top = lead_h
+    avail = h - top - reserve
+    if rows_needed * card_h > avail:
         avail = h - top - 1   # hará falta la nota de "+N más"
-    card_h = max(5, min(8, avail // rows_needed))
-    face_rows = 6 if card_h >= 8 else 4 if card_h >= 6 else 3
     fit = max(1, avail // card_h) * per_row
     first = max(0, idx - fit + 1) if idx is not None and idx >= fit else 0
     shown = agents[first:first + fit]
@@ -1586,6 +1677,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
 
     gap = 2
     cw = (w - indent - gap * (per_row - 1)) // per_row
+    inner_rows = card_h - 2
     rows_shown = -(-len(shown) // per_row)
     spare = 0
     if indent:   # guía tenue desde el lead hasta cada fila
@@ -1604,13 +1696,18 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.box(x, y, cw, this_h, edge, heavy=chosen)
         show_face = cw >= 64
         fw = FACE_SIZE[face_rows][0] // 2
-        if show_face:   # centrada en un hueco del mismo ancho para todas, sea cual sea su tamaño
-            put_cells(cv, x + 2 + (slot - fw) // 2, y + 1, agent_face(v, phase, n, now, face_rows))
+        g = agent_game(v)
+        if show_face:   # centrado en un hueco del mismo ancho para todos; las barras, debajo
+            put_cells(cv, x + 2 + (slot - fw) // 2, y + 1, agent_face(v, phase, n, now, face_rows, g["tier"]))
+            put_stats(cv, x + 2, y + 1 + face_rows, stat_rows(g, v["color"] if live else DIM, stat_n, now))
         ix = x + (tx if show_face else 2)
         iw = x + cw - 2 - ix   # el texto ocupa todo el ancho de la fila
         inner = this_h - 2
         icon, ist = agent_icon(v, phase, n)
-        stat = agent_time(v, now) + (f" · {v['tools']} tools" if v["tools"] else "") + (f" · {v['model']}" if v["model"] else "")
+        stat = (f"{g['rounds']} ronda{'s' if g['rounds'] != 1 else ''} · " + agent_time(v, now)
+                + (f" · {v['tools']} tools" if v["tools"] else "") + (f" · {v['model']}" if v["model"] else ""))
+        if g["tier"]:
+            stat = f"{EVO[g['tier']]} · " + stat
         cv.put(ix, y + 1, icon, ist)
         cv.put(ix + 2, y + 1, trunc(v["type"], max(0, iw - len(stat) - 4)), f"bold {v['color']}" if live else "bold" if chosen else FG)
         cv.put(ix + iw - len(stat), y + 1, stat, v["color"] if live else DIM)
@@ -1713,9 +1810,11 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
         cv.put(0, 1, trunc(f"▶ {name}{more}: {lab}", w), TOOL)
     else:
         cv.put(0, 1, trunc(s.title or "—", w), DIM)
-    fill = round(pct / 100 * 12)
-    x = segs(cv, 0, 2, [("contexto ", DIM), ("█" * fill, TOOL if pct < 60 else LEAD if pct < 85 else ERR),
-                        ("░" * (12 - fill), LINE), (f" {pct}%", FG)])
+    g = lead_game(s)
+    x = segs(cv, 0, 2, [("HP ", DIM), *meter(g["hp"], 100, 8, hp_color(g["hp"])), (f" {g['hp']}%  ", hp_color(g["hp"])),
+                        ("LV ", DIM), (f"{g['lvl']} ", f"bold {color}"), *meter(g["lvl"] % 10, 10, 10, color),
+                        ("  XP ", DIM), *meter(g["xp"], 10, 8, HIGHLIGHT), (f" {g['xp']}/10", HIGHLIGHT),
+                        (f"  {g['rounds']} rondas", DIM)])
     extra = [f"salida {ktok(s.out_tokens)}"]
     if s.cache_pct is not None:
         extra.append(f"caché {s.cache_pct}%")
@@ -2351,14 +2450,18 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
 
     row("modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
                                          s.perm and f"permisos {s.perm}") if x))
+    g = lead_game(s)
+    t.append(f"{'nivel':<11}", style=DIM)
+    t.append(f"LV {g['lvl']} · {g['rounds']} rondas · {g['xp']}/10 para subir"
+             + (f" · {EVO[g['tier']]}" if g["tier"] else "") + "\n", style=FG)
     if s.ctx:
         pct = min(100, round(100 * s.ctx / s.window()))
         fill = round(pct / 100 * 12)
-        t.append(f"{'contexto':<11}", style=DIM)
+        t.append(f"{'HP':<11}", style=DIM)
         t.append("█" * fill, style=TOOL if pct < 60 else LEAD if pct < 85 else ERR)
         t.append("░" * (12 - fill), style=LINE)
         left = s.turns_left()
-        t.append(f" {pct}% · {ktok(s.ctx)} de {ktok(s.window())}"
+        t.append(f" {100 - pct}% libre · {ktok(s.ctx)} de {ktok(s.window())}"
                  + (f" · ~{left} turnos para llenarse" if left is not None else "") + "\n", style=FG)
     why = store.stuck(s, now)
     if why:
@@ -3049,6 +3152,7 @@ def new_ui():
             "open": set(),                # listas desplegadas en la actividad
             "g_at": 0.0,                  # cuándo llegó una g, para reconocer gg
             "entry": None,                # entrada del log abierta en ventana flotante (Enter)
+            "tiers": {},                  # evolución vista de cada agente, para anunciar las nuevas
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
             "cheat": "", "cheat_at": 0.0, "cheat_undo": None,   # lo tecleado hacia un truco
@@ -3076,6 +3180,8 @@ def render(console, store, focus_sid, account, now, ui=None):
     focus = by_id.get(focus_sid) or store.auto_focus(sessions)
     compact = height < 34
     dh = 15 if compact else 21 if height < 46 else 25
+    if ui["layout"] == "diagrama" and height >= 40:
+        dh += 4   # rostros con sus barras: el diagrama necesita más alto que los demás diseños
     wide = width >= 108
     side_w = 34 if wide else 0
     rows = max(1, height - 3 - (dh + 2) - 1 - 2)
@@ -3753,6 +3859,14 @@ def run(accounts, once, cfg):
                     notify(store, ui, sid, kind, text, now)
                 if focus is not None:
                     store.git_info(focus, now, refresh=True)
+                    # cada 10 niveles el rostro evoluciona: se anuncia una vez por agente
+                    for key, name, g in [(focus.sid, "el lead", lead_game(focus))] + [
+                            (v["id"], v["type"], agent_game(v)) for v in store.agents(focus)]:
+                        before = ui["tiers"].get(key)
+                        ui["tiers"][key] = g["tier"]
+                        if before is not None and g["tier"] > before:
+                            notify(store, ui, focus.sid, "evo", f"{name} llegó al nivel {g['lvl']}: {EVO[g['tier']]}", now)
+                            ui["glitch"] = now + 0.8
                 if reload_limits(cfg, ui, cfg_seen, now) and store.off != set(cfg["disabled"]):
                     store.off = set(cfg["disabled"])
                     store.t_glob = store.t_live = 0.0

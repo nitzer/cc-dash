@@ -116,6 +116,28 @@ y hooks. Si no cabe, `AvPág`/`RePág` lo desplazan.
 La ventana de contexto no figura en los transcripts: se asume 1M si el modelo
 lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
 
+## HP, nivel y experiencia
+
+Cada agente (el lead y cada subagente) tiene estadísticas de juego, que en el
+diseño `diagrama` van debajo de su rostro:
+
+- **HP**: el contexto libre. Baja a medida que el agente llena su ventana de
+  contexto; se pone ámbar por debajo de 50 %, rojo por debajo de 20 % y
+  parpadea por debajo de 10 %.
+- **Rondas**: las del lead son sus turnos; las de un subagente, sus llamadas
+  al modelo.
+- **LV**: cada 10 rondas sube un nivel. La barra de LV muestra cuánto falta
+  para la próxima evolución.
+- **XP**: las rondas del nivel actual, de 0 a 10 (`XP ▰▰▰▱▱▱▱▱ 3/10`).
+- **Evolución**: cada 10 niveles (100 rondas) el rostro mejora. EVO I suma una
+  cresta, EVO II implantes que brillan con los ojos, EVO III un halo y EVO MAX
+  brillos dorados. Cada evolución se anuncia con un toast.
+
+El número exacto de rondas aparece junto al agente (`23 rondas`), en la fila
+del lead (`23 rondas · nivel 3, sube en 7`) y en el panel de actividad. Los
+demás diseños muestran HP, LV y XP en la cabecera del lead. Si no caben las
+tres barras, se resumen en una o dos líneas.
+
 ## Foco en un subagente
 
 `F` centra el dashboard en un subagente: el seleccionado o, si no hay ninguno,
