@@ -78,16 +78,16 @@ Las principales:
 - `d`: diseño · `T`: tema · `,`: configuración · `q`: sale
 
 `d` alterna el panel de agentes entre cinco diseños: `lista`, `tabla`,
-`tarjetas`, `tiempo` y `diagrama`. En `diagrama` cada subagente es una tarjeta
-con un rostro cyberpunk que cuelga del lead: calavera, oni, visor, respirador,
-kitsune o cíclope, según el tipo de subagente. Los rostros están dibujados con
-puntos de braille tramados, en el color del subagente con brillos cian, y los
-ojos encendidos en un color que contrasta. Las tarjetas aparecen a medida que
-el lead crea subagentes, sin casillas vacías: en una fila con rostros grandes
-o, si no caben, en dos filas con rostros más pequeños. Mientras trabaja, los
-ojos laten (el visor barre de lado a lado) y la imagen se corrompe a ratos
-cuando usa una herramienta. Al terminar, el rostro se apaga; si falla, se
-agrieta y se tiñe de rojo.
+`tarjetas`, `tiempo` y `diagrama`. En `diagrama`, sin flechas, el lead ocupa
+la primera fila y debajo va una fila por subagente. Cada fila tiene el rostro
+cyberpunk del agente (calavera, oni, visor, respirador, kitsune o cíclope,
+según su tipo, en puntos de braille tramados), quién es y qué hace. A la
+derecha, sobre un fondo propio, su log: la hora, la herramienta en su color y
+el detalle, con la última acción resaltada y los errores en rojo. El lead
+también muestra a la derecha sus últimas acciones. Las filas se encogen para
+que quepan todos los subagentes; si aun así no caben, se recorren con
+`j`/`k` o `←`/`→`. Mientras trabaja, los ojos del rostro laten; al terminar se
+apaga, y si falla se agrieta en rojo.
 
 Cada subagente tiene un color propio, por orden de creación, que se repite en
 su tarjeta o fila en todos los diseños y en el gráfico de actividad.

@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.34.0"
+__version__ = "0.35.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1491,91 +1491,116 @@ def put_cells(cv, x, y, cells):
                 cv.put(x + c, y + r, ch, style)
 
 
+def recent_events(store, s, per=8, scan=3000):
+    """Últimas entradas del log de la sesión, por autor: "lead" o el id del subagente."""
+    out = {}
+    for e in reversed(store.log[-scan:]):
+        if e[1] == s.sid:
+            got = out.setdefault(e[5] or "lead", [])
+            if len(got) < per:
+                got.append(e)
+    return {k: v[::-1] for k, v in out.items()}
+
+
+def mini_log(cv, x, y, w, rows, events, color, bg=CARD_BG):
+    """Columna con lo que fue haciendo un agente, sobre fondo propio para distinguirla."""
+    for r in range(rows):
+        cv.put(x, y + r, " " * w, f"on {bg}")
+    shown = events[-rows:]
+    if not shown:
+        cv.put(x + 1, y, trunc("sin actividad todavía", w - 2), f"{DIM} on {bg}")
+        return
+    for r, e in enumerate(shown):
+        ts, _, style, tag, text = e[:5]
+        if tag.startswith("↳ ") and ": " in text:   # herramienta de un subagente: "Grep: patrón"
+            tag, text = text.split(": ", 1)
+        bad = THEME.get(style, style) == ERR or text.startswith("✗")
+        line_y = y + r
+        cx = segs(cv, x + 1, line_y, [(time.strftime("%H:%M:%S", time.localtime(ts)) + " ", f"{DIM} on {bg}")])
+        if cx >= x + w - 4:
+            continue
+        name = trunc(tag, 9)
+        cv.put(cx, line_y, f"{name:<9} ", f"bold {ERR if bad else color} on {bg}")
+        room = x + w - 1 - (cx + 10)
+        if room > 3:
+            last = r == len(shown) - 1
+            cv.put(cx + 10, line_y, trunc(text, room), f"{ERR if bad else FG if last else blend(LINE, FG, 0.7)} on {bg}")
+
+
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focus=None):
+    """El lead en una fila y, debajo, una fila por subagente: su rostro, quién es y, a la
+    derecha, el log de lo que fue haciendo."""
     cv = Canvas(w, h)
     if s is None:
         cv.put(2, 2, "sin sesiones todavía — abre Claude Code en otra terminal", DIM)
         return cv.text()
     phase = int(now * 9)
     state = store.state(s)
+    everyone = store.agents(s)
+    agents = store.visible(s, now, show_all, sel)
+    gh = graph_rows(h)
+    activity_graph(cv, h - gh, w, gh, s, everyone, now, focus=focus)
+    h -= gh
+    recent = recent_events(store, s)
 
-    # advisor
-    aw = 22 if w >= 72 else 0
-    if aw:
-        hot = now - s.advisor_last < 12
-        ast = ADVISOR if s.advisor else LINE
-        cv.box(0, 0, aw, 5, ast if hot else LINE)
-        cv.put(2, 1, "■ advisor", f"bold {ast}")
-        cv.put(2, 2, trunc(short_model(s.advisor) if s.advisor else "sin advisor", aw - 4), FG if s.advisor else DIM)
-        cv.put(2, 3, trunc(f"{s.advisor_calls} consultas" if s.advisor_calls else
-                           ("on call" if s.advisor else "—"), aw - 4), DIM)
-        gap = 6
-        cv.put(aw, 2, "┄" * (gap - 1) + "▶", ast if s.advisor else LINE)
-        if hot:
-            cv.tint(hpath(aw, aw + gap - 1, 2), f"bold {breath(ADVISOR, now)}")
-        lx = aw + gap
-    else:
-        lx = 0
-
-    # lead: su figura a la izquierda, estado y cifras a la derecha
-    lw = w - lx
+    # ── fila del lead ──
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
-    cv.box(lx, 0, lw, 5, lst)
-    put_cells(cv, lx + 2, 1, lead_face(state, now))
-    tx = lx + 10
-    inner = lw - 12
+    cv.box(0, 0, w, 5, lst)
+    put_cells(cv, 2, 1, lead_face(state, now))
+    tx = 10
+    with_log = w >= 90
+    iw = (w - tx - 2) // 2 if with_log else w - tx - 2
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
-    cv.put(tx, 1, trunc(who, max(0, inner - len(right) - 2)), f"bold {lst}")
-    cv.put(lx + lw - 2 - len(right), 1, right, f"bold {lst}")
+    cv.put(tx, 1, trunc(who, max(0, iw - len(right) - 2)), f"bold {lst}")
+    cv.put(tx + iw - len(right), 1, right, f"bold {lst}")
     stats = f"{s.turns} turnos · {s.tools} tools · salida {ktok(s.out_tokens)}"
     if s.ctx:
         stats += f" · contexto {min(100, round(100 * s.ctx / s.window()))}%"
     if s.cost is not None:
         stats += f" · ${s.cost:.2f}"
-    cv.put(tx, 2, trunc(stats, inner), DIM)
-    plain = list(s.pending.values())
+    if s.advisor:
+        stats += f" · advisor {short_model(s.advisor)}" + (f" ×{s.advisor_calls}" if s.advisor_calls else "")
+    cv.put(tx, 2, trunc(stats, iw), DIM)
     why = store.stuck(s, now)
+    plain = list(s.pending.values())
     if state == "waiting":
         doc = f" · D abre {os.path.basename(s.docs[-1])}" if s.docs else ""
-        cv.put(tx, 3, trunc(f"◆ necesita {store.waiting_for(s)}{doc}", inner), f"bold {breath(WAIT, now)}")
+        cv.put(tx, 3, trunc(f"◆ necesita {store.waiting_for(s)}{doc}", iw), f"bold {breath(WAIT, now)}")
     elif why:
-        cv.put(tx, 3, trunc("⚠ posible atasco: " + " · ".join(why), inner), f"bold {breath(ERR, now)}")
+        cv.put(tx, 3, trunc("⚠ posible atasco: " + " · ".join(why), iw), f"bold {breath(ERR, now)}")
     elif plain and state != "ended":
         name, lab, _ = max(plain, key=lambda p: p[2])
         more = f" (+{len(plain) - 1})" if len(plain) > 1 else ""
-        cv.put(tx, 3, trunc(f"▶ {name}{more}: {lab}", inner), TOOL)
+        cv.put(tx, 3, trunc(f"▶ {name}{more}: {lab}", iw), TOOL)
     else:
-        cv.put(tx, 3, trunc(s.title or "—", inner), DIM)
+        cv.put(tx, 3, trunc(s.title or "—", iw), DIM)
+    if with_log:
+        lx = tx + iw + 2
+        mini_log(cv, lx, 1, w - lx - 1, 3, [e for e in recent.get("lead", []) if e[3] != "Agent"], LEAD)
 
-    # subagentes: una tarjeta por cada uno, solo las que existen
-    everyone = store.agents(s)
-    agents = store.visible(s, now, show_all, sel)
-    gh = graph_rows(h)
-    activity_graph(cv, h - gh, w, gh, s, everyone, now, focus=focus)
-    h -= gh   # las tarjetas y las notas quedan por encima del gráfico
-    trunk = lx + lw // 2
-    # rostros grandes en una fila; si no caben todos y hay sitio para dos filas, más pequeños
-    face_rows = 6 if h >= 7 + 8 + 1 else 4
-    if face_rows == 6 and len(agents) > max(1, (w + 2) // (FACE_SIZE[6][0] // 2 + 28)) and h >= 7 + 2 * 6 + 2:
-        face_rows = 4
-    fw = FACE_SIZE[face_rows][0] // 2
-    card_h, sgap = face_rows + 2, 2
-    rows = 2 if h >= 7 + 2 * card_h + 2 else 1
-    top = 7 if h >= 7 + card_h + 1 else 5   # en paneles bajos las tarjetas suben y se quitan las ramas
-    per_row = max(1, (w + sgap) // (fw + 26 + sgap))
-    cap = per_row * rows
+    # ── una fila por subagente ──
+    top = 5
+    gone = len(everyone) - len(agents)
     idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
-    first = max(0, idx - cap + 1) if idx is not None and idx >= cap else 0
-    shown = agents[first:first + cap]
+    per_row = 2 if w >= 170 else 1
+    rows_needed = max(1, -(-len(agents) // per_row))
+    # el tamaño más grande con el que caben todos; si no caben, el más pequeño y se pagina
+    avail = h - top - (1 if gone or (show_all and everyone) else 0)
+    card_h = next((c for c in (8, 6, 5) if rows_needed * c <= avail), 5)
+    if rows_needed * card_h > avail:
+        avail = h - top - 1   # hará falta la nota de "+N más"
+    face_rows = card_h - 2
+    fit = max(1, avail // card_h) * per_row
+    first = max(0, idx - fit + 1) if idx is not None and idx >= fit else 0
+    shown = agents[first:first + fit]
 
     notes, live_hidden = [], 0
     if len(agents) > len(shown):
-        hidden = agents[:first] + agents[first + cap:]
+        hidden = agents[:first] + agents[first + fit:]
         live_hidden = sum(1 for v in hidden if v["running"])
-        notes.append(f"+{len(hidden)} más" + (f", {live_hidden} en marcha" if live_hidden else "") + " · ←→")
-    gone = len(everyone) - len(agents)
+        notes.append(f"+{len(hidden)} más" + (f", {live_hidden} en marcha" if live_hidden else "") + " · j/k o ←→")
     if gone:
         notes.append(f"{gone} terminado{'s' if gone != 1 else ''} oculto{'s' if gone != 1 else ''} · t")
     elif show_all and any(not v["running"] for v in everyone):
@@ -1585,77 +1610,52 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.put(max(0, w - len(note)), h - 1, note, SWARM if live_hidden else DIM)
 
     if not shown:
-        # dojo vacío: un samurái meditando hasta que el lead cree subagentes
         if idle_rain == "force" or (idle_rain and not everyone):
-            rain(cv, 6, now, h)
+            rain(cv, top, now, h)
         mid = w // 2
-        size = 6 if h >= 15 else 4
-        put_cells(cv, mid - FACE_SIZE[size][0] // 4, 7, dither(face_pixels(_visor, size),
-                                                              (LINE, LINE, blend(LINE, FG, 0.35)), None))
-        msg = "sin subagentes · sus rostros aparecen aquí a medida que el lead los invoca"
-        msg = trunc(msg, w - 2)
-        cv.put(max(0, mid - len(msg) // 2), 7 + size + 1, msg, DIM)
+        size = 6 if avail >= 8 else 4
+        put_cells(cv, mid - FACE_SIZE[size][0] // 4, top + 1, dither(face_pixels(_visor, size),
+                                                                    (LINE, LINE, blend(LINE, FG, 0.35)), None))
+        msg = trunc("sin subagentes · aparecen aquí, uno por fila, a medida que el lead los invoca", w - 2)
+        cv.put(max(0, mid - len(msg) // 2), top + size + 2, msg, DIM)
         return cv.text()
-
     if idle_rain == "force":
-        rain(cv, 6, now, h)
-    first_row = shown[:per_row]
-    sw = min(fw + 40, (w - sgap * (per_row - 1)) // per_row)
+        rain(cv, top, now, h)
 
-    def card_x(col, count):
-        total = count * sw + (count - 1) * sgap
-        return (w - total) // 2 + col * (sw + sgap)
-
-    centers = [card_x(c, len(first_row)) + sw // 2 for c in range(len(first_row))]
-    if top == 7:
-        cv.put(trunk, 5, "│", LINE)
-        if centers == [trunk]:
-            cv.put(trunk, 6, "│", LINE)
-        else:
-            cv.branch(6, centers, trunk, LINE, down=True)
-    glow = []
+    gap = 2
+    cw = (w - gap * (per_row - 1)) // per_row
     for n, v in enumerate(shown):
         row, col = divmod(n, per_row)
-        # la primera fila va centrada; las siguientes, en las columnas de la primera para colgar de ella
-        count = min(per_row, len(shown)) if row == 0 else per_row
-        x, y = card_x(col, count), top + row * (card_h + 1)
-        live = v["running"]
-        chosen = v["id"] == sel
+        x, y = col * (cw + gap), top + row * card_h
+        live, chosen = v["running"], v["id"] == sel
         failed = bool(v["end"]) and v["status"] != "completed"
         edge = "bold #ffffff" if chosen else ERR if failed else v["color"] if live else LINE
-        cv.box(x, y, sw, card_h, edge, heavy=chosen)
-        cx = x + sw // 2
-        if row == 0:
-            if top == 7:
-                cv.put(cx, y, "┴", v["color"] if live else LINE)
-                if live:
-                    glow.append(([(trunk, 5)] + hpath(trunk, centers[col], 6) + [(cx, y)], v["color"]))
-        else:   # cuelga de la tarjeta de arriba
-            cv.put(cx, y - 2, "┬", LINE)
-            cv.put(cx, y - 1, "│", LINE)
-            cv.put(cx, y, "┴", LINE)
-        put_cells(cv, x + 2, y + 1, agent_face(v, phase, n, now, face_rows))
-        ix, inner = x + fw + 4, sw - fw - 6
+        cv.box(x, y, cw, card_h, edge, heavy=chosen)
+        show_face = cw >= 64
+        fw = FACE_SIZE[face_rows][0] // 2 if show_face else 0
+        if show_face:
+            put_cells(cv, x + 2, y + 1, agent_face(v, phase, n, now, face_rows))
+        ix = x + 2 + (fw + 2 if show_face else 0)
+        iw = max(16, min(30, (cw - (ix - x) - 2) // 2))
         icon, ist = agent_icon(v, phase, n)
         cv.put(ix, y + 1, icon, ist)
-        head = v["type"] + (f" · {v['model']}" if v["model"] else "")
-        cv.put(ix + 2, y + 1, trunc(head, inner - 2), f"bold {v['color']}" if live else "bold" if chosen else FG)
-        # con rostro grande sobra sitio: la tarea ocupa dos líneas
-        desc = textwrap.wrap(v["desc"], inner) or [""]
-        if face_rows >= 6 and len(desc) > 1:
-            cv.put(ix, y + 2, desc[0], FG if live or chosen else DIM)
-            cv.put(ix, y + 3, trunc(" ".join(desc[1:]), inner), FG if live or chosen else DIM)
-            line = y + 4
-        else:
-            cv.put(ix, y + 2, trunc(v["desc"], inner), FG if live or chosen else DIM)
-            line = y + 3
+        cv.put(ix + 2, y + 1, trunc(v["type"], iw - 2), f"bold {v['color']}" if live else "bold" if chosen else FG)
+        desc = textwrap.wrap(v["desc"], iw) or [""]
+        dl = 2 if face_rows >= 6 else 1 if face_rows >= 4 else 0
+        for k in range(dl):
+            if k < len(desc):
+                text = desc[k] if k < dl - 1 or len(desc) <= dl else trunc(" ".join(desc[k:]), iw)
+                cv.put(ix, y + 2 + k, text, FG if live or chosen else DIM)
         text, tst = agent_now(v)
-        cv.put(ix, line, trunc(text, inner), tst)
-        stat = agent_time(v, now) + (f" · {v['tools']} tools" if v["tools"] else "")
-        cv.put(ix, line + 1, trunc(stat, inner), v["color"] if live else DIM)
-    # los caminos de los subagentes en marcha "respiran"
-    for cells, color in glow:
-        cv.tint(cells, f"bold {breath(color, now)}")
+        cv.put(ix, y + 2 + dl, trunc(text, iw), tst)
+        stat = agent_time(v, now) + (f" · {v['tools']} tools" if v["tools"] else "") + (f" · {v['model']}" if v["model"] else "")
+        cv.put(ix, y + 3 + dl, trunc(stat, iw), v["color"] if live else DIM)
+        # a la derecha, su log, sobre fondo propio
+        lx = ix + iw + 1
+        if x + cw - 1 - lx >= 20:
+            mine = recent.get(v["aid"], []) + recent.get(v["id"], [])
+            mine.sort(key=lambda e: e[0])
+            mini_log(cv, lx, y + 1, x + cw - 1 - lx, card_h - 2, mine, v["color"] if live or chosen else blend(LINE, v["color"], 0.6))
     return cv.text()
 
 
