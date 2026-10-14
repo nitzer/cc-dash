@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.37.1"
+__version__ = "0.38.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2773,7 +2773,8 @@ KEYS = [
         ("Tab  ·  Shift+Tab", "pasa el foco al panel siguiente o anterior"),
         ("j k", "se mueve dentro del panel con el foco"),
         ("gg  ·  G", "primero  ·  último"),
-        ("Enter", "agentes: foco · log: detalle · actividad: abre archivo o despliega"),
+        ("Enter", "agentes: foco · log: detalle · actividad: despliega la lista"),
+        ("e", "actividad: git diff del archivo bajo el cursor"),
     ]),
     ("General", [
         ("?", "esta ayuda"),
@@ -3023,7 +3024,7 @@ def mode_hint(ui):
     if free and ui["pane"] == "agentes":
         return "agentes · j/k elige · gg/G primero/último · Enter foco · r/p respuesta/prompt · tab panel"
     if free and ui["pane"] == "detalle":
-        return ("actividad · j/k mueve · Enter abre el archivo o despliega la lista · gg/G · tab panel" if ui["dkind"] == "list"
+        return ("actividad · j/k mueve · Enter despliega la lista · e git diff del archivo · gg/G · tab panel" if ui["dkind"] == "list"
                 else "panel derecho · j/k desplaza · gg/G principio/final · tab panel")
     if ui["settings"] is not None:
         return "configuración: j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar"
@@ -3269,6 +3270,34 @@ def is_doc(path):
 CODE_VIEWERS = ("bat --paging=always", "batcat --paging=always", "less -R", "more")   # para lo que no es .md
 
 
+def diff_command(path):
+    """Orden que muestra lo que cambió en `path` según git, y una nota para el usuario.
+
+    Cambios sin commitear; si el archivo es nuevo, entero como añadido; si no hay cambios
+    pendientes, el último commit que lo tocó. (None, motivo) si no se puede."""
+    where = os.path.dirname(path) or "."
+
+    def rc(*args):
+        try:
+            return git(where, *args, timeout=5).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return -1
+
+    if not os.path.isdir(where) or rc("rev-parse", "--show-toplevel") != 0:
+        return None, "no está en un repositorio git"
+    q = shlex.quote(path)
+    pager = "less -R" if shutil.which("less") else "more"
+    base = f"cd {shlex.quote(where)} && git --no-pager"
+    tracked = rc("ls-files", "--error-unmatch", "--", path) == 0
+    if not tracked:
+        if not os.path.isfile(path):
+            return None, "ya no existe y git no lo conoce"
+        return f"{base} diff --no-index --color=always /dev/null {q} | {pager}", "archivo nuevo, sin seguimiento"
+    if rc("diff", "--quiet", "HEAD", "--", path) == 1:   # hay cambios respecto al último commit
+        return f"{base} diff --color=always HEAD -- {q} | {pager}", "cambios sin commitear"
+    return f"{base} log -p -1 --color=always -- {q} | {pager}", "sin cambios pendientes: último commit que lo tocó"
+
+
 def viewer_command(cfg, path):
     """Orden de shell que abre `path`: la configurada o el primer visor instalado.
 
@@ -3290,13 +3319,13 @@ def tmux_out(*args):
     return got.stdout.strip() if got.returncode == 0 else None
 
 
-def open_doc(cfg, path, pane=None, only_visible=False):
-    """Abre un documento con el visor configurado, sin esperar a que se cierre.
+def open_doc(cfg, path, pane=None, only_visible=False, cmd=None, title=None):
+    """Abre un documento con el visor configurado (u otra orden, `cmd`), sin esperar a que se cierre.
 
     Devuelve "" si lo abrió; "tty" si el visor necesita una terminal y no hay tmux;
     "hidden" si `only_visible` y nadie está mirando ese panel; o el motivo del fallo.
     """
-    cmd = viewer_command(cfg, path)
+    cmd = cmd or viewer_command(cfg, path)
     if not cmd:
         return 'no hay visor instalado: elige uno con `cc-dash set viewer "PROGRAMA"`'
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE,
@@ -3318,7 +3347,7 @@ def open_doc(cfg, path, pane=None, only_visible=False):
         if not clients:
             return "hidden" if only_visible else "no hay ningún cliente de tmux en esa sesión"
         argv = ["tmux", "display-popup", "-c", clients[-1].split(" ", 1)[1], "-t", pane, "-E",
-                "-w", "90%", "-h", "90%", "-T", f" {os.path.basename(path)} · {os.path.dirname(path).replace(HOME, '~')} ",
+                "-w", "90%", "-h", "90%", "-T", title or f" {os.path.basename(path)} · {os.path.dirname(path).replace(HOME, '~')} ",
                 "-d", os.path.dirname(path) or ".", cmd]
     try:
         proc = subprocess.Popen(argv, shell=isinstance(argv, str), **quiet)
@@ -3573,19 +3602,19 @@ def run(accounts, once, cfg):
     focus_sid = None
     seen = {}        # sid -> (estado, desde cuándo trabaja), para los avisos
 
-    def view_doc(doc):
-        """Abre un .md con el visor configurado (popup de tmux, o la terminal entera sin tmux)."""
-        why = open_doc(cfg, doc)
+    def view_doc(doc, cmd=None, title=None, note=None):
+        """Abre un archivo con el visor (u otra orden) en un popup de tmux, o en la terminal entera sin tmux."""
+        why = open_doc(cfg, doc, cmd=cmd, title=title)
         if why == "tty":   # sin tmux: el visor toma la terminal hasta que se cierre
             live.stop()
             if saved is not None:
                 termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-            subprocess.run(viewer_command(cfg, doc), shell=True)
+            subprocess.run(cmd or viewer_command(cfg, doc), shell=True)
             if fd is not None:
                 tty.setcbreak(fd)
             live.start(refresh=True)
             why = ""
-        ui["flash"] = (why or f"abierto {os.path.basename(doc)}", time.time() + 4)
+        ui["flash"] = (why or note or f"abierto {os.path.basename(doc)}", time.time() + 4)
 
     def open_entry(e):
         """Enter sobre una entrada del log: un .md se abre con el visor; lo demás, en una ventana flotante."""
@@ -3911,20 +3940,28 @@ def run(accounts, once, cfg):
                     ui["sel"] = ui["focus"] = None
                     ui["scroll"] = 0
                     continue
+                if pane == "detalle" and ui["dkind"] == "list" and keys == b"e":
+                    # e: lo que cambió en el archivo bajo el cursor, según git
+                    title = ui["dmarks"].get(ui["dcur"]) or ""
+                    item = ui["ditems"].get(ui["dcur"])
+                    if not (item and title.startswith("archivos")):
+                        ui["flash"] = ("e muestra el git diff: pon el cursor sobre un archivo", now + 3)
+                        continue
+                    path = os.path.join(focus.cwd if focus else "", item)
+                    cmd, note = diff_command(path)
+                    if cmd is None:
+                        ui["flash"] = (f"{os.path.basename(path)}: {note}", now + 3)
+                    else:
+                        view_doc(path, cmd=cmd, note=f"{os.path.basename(path)}: {note}",
+                                 title=f" diff · {os.path.basename(path)} · {note} ")
+                    continue
                 if pane == "detalle" and ui["dkind"] == "list" and (
                         down or up or first or last or keys in (b"\r", b"\n", b"l", b" ", b"b", b"\x1b[6~", b"\x1b[5~")):
                     # actividad: un cursor por líneas; Enter despliega la lista bajo el cursor
                     n = max(1, ui["dlines"])
                     if keys in (b"\r", b"\n", b"l"):
                         title = ui["dmarks"].get(ui["dcur"])
-                        item = ui["ditems"].get(ui["dcur"])
-                        if item and title and title.startswith("archivos"):   # un archivo: se abre
-                            path = os.path.join(focus.cwd if focus else "", item)
-                            if os.path.isfile(path):
-                                view_doc(path)
-                            else:
-                                ui["flash"] = (f"{os.path.basename(path)} ya no existe", now + 3)
-                        elif title:
+                        if title:
                             ui["open"] ^= {title}
                     else:
                         step = 1 if down else -1 if up else page if keys in (b" ", b"\x1b[6~") else -page

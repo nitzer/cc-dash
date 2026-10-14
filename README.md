@@ -63,10 +63,16 @@ flechas) se mueven, `gg` va al primero y `G` al último:
   `Esc` o `Enter` cierran). El panel derecho ya no cambia solo al mover el
   cursor.
 - **panel derecho:** en la actividad, un cursor recorre las líneas. `Enter`
-  sobre un archivo (editado o leído) lo abre en un popup: los `.md` con el
-  visor configurado y el resto con `bat`, o `less` si no está. Sobre cualquier
-  otra línea, `Enter` despliega o pliega esa lista (herramientas, archivos,
-  skills…) para verla entera. En respuestas, prompts, tareas o novedades, `j`/`k`
+  despliega o pliega la lista bajo el cursor (herramientas, archivos,
+  skills…) para verla entera. `e` sobre un archivo (editado o leído) muestra en
+  un popup lo que cambió según git, con colores:
+  - los cambios sin commitear respecto al último commit;
+  - si es nuevo y git no lo sigue, el archivo entero como añadido;
+  - si no tiene cambios pendientes, el último commit que lo tocó (útil si la
+    sesión ya commiteó).
+
+  La barra inferior dice cuál de los tres casos es. Fuera de un repositorio
+  git lo avisa y no abre nada. En respuestas, prompts, tareas o novedades, `j`/`k`
   desplazan el texto.
 
 Las principales:
