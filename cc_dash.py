@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1199,10 +1199,12 @@ def hpath(x0, x1, y):
 
 # ── diseño "diagrama": el lead y su escuadrón de samuráis ─────────────────
 
-HELMETS = ("\\_V_/", "\\_Y_/", "/^^^\\", "\\_W_/", ".-^-.")   # kabuto: uno por tipo de subagente
-ARMORS = ("/###\\", "/=#=\\", "/|+|\\", "/[#]\\")
+HELMETS = ("╲▄██▄╱", "▲▄██▄▲", "╱▀██▀╲", "▄▟██▙▄", "┃▄██▄┃")   # kabuto: uno por tipo de subagente
+ARMORS = ("▟▓▓▓▓▙", "▟▓▒▒▓▙", "▟█▓▓█▙", "▟▒▓▓▒▙")
 STEEL = "#d7dde8"   # color de la katana
+BLOOD = "#ff2a3c"   # ojos encendidos
 BLADE = set("┃━╋╾╍")
+EYES = set("◣◢◆")
 
 
 def samurai(v, phase, i):
@@ -1211,27 +1213,29 @@ def samurai(v, phase, i):
     helm, armor = HELMETS[seed % len(HELMETS)], ARMORS[(seed // 7) % len(ARMORS)]
     failed = bool(v["end"]) and v["status"] != "completed"
     if v["running"]:
-        eyes = "[-_-]" if (phase + i * 11) % 31 == 0 else "[o-o]"   # parpadea de vez en cuando
+        mask = " █▄▄█" if (phase + i * 11) % 41 == 0 else " █◣◢█"   # parpadeo: los ojos se cierran un instante
         if v["tool"] and (phase // 4 + i) % 2:   # trabajando con una herramienta: tajo
-            return [f" {helm}", f" {eyes}", f" {armor}━━━━", "  / \\"]
-        return [f" {helm}  ┃", f" {eyes}  ┃", f" {armor}━╋", "  / \\"]   # en guardia
-    if failed:
-        return [f" {helm.replace(helm[2], 'x')}", " [x-x]", f" {armor} ━ ╍", " _/ \\_"]
+            return [helm, mask, f"{armor}━━━━", "▐▌  ▐▌"]
+        return [f"{helm} ┃", f"{mask}  ┃", f"{armor}━╋", "▐▌  ▐▌"]   # en guardia
+    if failed:   # máscara partida, de rodillas
+        return [helm[:3] + " " + helm[4:], " █x ▚", "▟▓▒░ ▙ ━ ╍", "▀▀  ▀▀"]
     if v["end"]:
-        return [f" {helm}", " [^-^]", f" {armor}╾─", "  / \\"]   # katana envainada
-    return [f" {helm}", " [-.-] z", f" {armor}", " _/ \\_"]       # interrumpido: dormido
+        return [helm, " █▬▬█", f"{armor}╾─", "▐▌  ▐▌"]   # katana envainada, ojos cerrados
+    return [helm, " █··█", armor, "▀▀  ▀▀"]   # interrumpido: la armadura sin nadie dentro
 
 
 def lead_face(state, phase):
-    eyes = {"busy": "[-_-]" if phase % 37 == 0 else "[O-O]", "waiting": "[?-?]",
-            "idle": "[-_-]", "ended": "[-.-]"}.get(state, "[O-O]")
-    return ["\\_W_/", eyes, "/###\\"]
+    eyes = {"busy": "█▄▼▄█" if phase % 37 == 0 else "█◣▼◢█", "waiting": "█◆▼◆█",
+            "idle": "█▬▼▬█", "ended": "█·▼·█"}.get(state, "█◣▼◢█")
+    return ["▲▄█▄▲", eyes, "▟▓▓▓▙"]
 
 
-def put_figure(cv, x, y, lines, body, steel=STEEL):
+def put_figure(cv, x, y, lines, body, steel=STEEL, eyes=None):
     for r, line in enumerate(lines):
         cv.put(x, y + r, line, body)
         cv.tint([(x + c, y + r) for c, ch in enumerate(line) if ch in BLADE], f"bold {steel}")
+        if eyes:
+            cv.tint([(x + c, y + r) for c, ch in enumerate(line) if ch in EYES], eyes)
 
 
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
@@ -1264,9 +1268,10 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     lw = w - lx
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
     cv.box(lx, 0, lw, 5, lst)
-    put_figure(cv, lx + 2, 1, lead_face(state, phase), f"bold {breath(lst, now) if state == 'waiting' else lst}")
-    tx = lx + 10
-    inner = lw - 12
+    put_figure(cv, lx + 2, 1, lead_face(state, phase), f"bold {lst}",
+               eyes=f"bold {breath(WAIT, now)}" if state == "waiting" else f"bold {breath(BLOOD, now)}")
+    tx = lx + 9
+    inner = lw - 11
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
@@ -1323,8 +1328,8 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
         if idle_rain == "force" or (idle_rain and not everyone):
             rain(cv, 6, now)
         mid = w // 2
-        put_figure(cv, mid - 4, 7, ["\\_V_/", "[-_-]  z" if int(now) % 4 < 2 else "[-_-] z", "_/###\\_"], LINE)
-        msg = "dojo vacío · los subagentes aparecen aquí a medida que el lead los crea"
+        put_figure(cv, mid - 3, 7, ["╲▄██▄╱", " █▬▬█", "▟▓▓▓▓▙", "▀▀▀▀▀▀"], LINE)
+        msg = "el dojo espera · los subagentes aparecen aquí a medida que el lead los invoca"
         msg = trunc(msg, w - 2)
         cv.put(max(0, mid - len(msg) // 2), 11, msg, DIM)
         return cv.text()
@@ -1365,9 +1370,10 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
             cv.put(cx, y - 1, "│", LINE)
             cv.put(cx, y, "┴", LINE)
         body = SWARM if live else ERR if failed else TOOL if v["end"] else DIM
-        put_figure(cv, x + 1, y + 1, samurai(v, phase, n), f"bold {body}" if live or chosen else body,
-                   steel=STEEL if live else DIM)
-        ix, inner = x + 12, sw - 14
+        body = blend(LINE, SWARM, 0.55) if live and not chosen else body   # la armadura oscura, los ojos y el acero brillan
+        put_figure(cv, x + 2, y + 1, samurai(v, phase, n), f"bold {body}" if chosen else body,
+                   steel=STEEL if live else DIM, eyes=f"bold {breath(BLOOD, now, n * 0.7)}" if live else None)
+        ix, inner = x + 13, sw - 15
         icon, ist = agent_icon(v, phase, n)
         cv.put(ix, y + 1, icon, ist)
         head = v["type"] + (f" · {v['model']}" if v["model"] else "")
