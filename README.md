@@ -56,6 +56,14 @@ Las principales:
 - `D`: abre el último `.md` que escribió la sesión (un spec, un plan…)
 - `d`: diseño · `T`: tema · `,`: configuración · `q`: sale
 
+`d` alterna el panel de agentes entre cinco diseños: `lista`, `tabla`,
+`tarjetas`, `tiempo` y `diagrama`. En `diagrama` cada subagente es una tarjeta
+con un samurái ASCII que cuelga del lead. Las tarjetas aparecen a medida que el
+lead crea subagentes, sin casillas vacías, y caben en una o dos filas según la
+altura. La pose dice qué hace cada uno: en guardia mientras piensa, dando tajos
+mientras usa una herramienta, la katana envainada al terminar y ojos en `x` si
+falla. Sin subagentes, un samurái medita en el dojo vacío.
+
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
 prompt) o, si no hay ninguno, la actividad de la sesión: porcentaje de la
 ventana de contexto, tokens y caché, turnos, herramientas más usadas, errores,

@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1197,15 +1197,50 @@ def hpath(x0, x1, y):
     return [(x, y) for x in range(x0, x1 + step, step)]
 
 
-def diagram(store, s, w, compact, now, sel=None, show_all=False):
-    h = 15 if compact else 21
+# ── diseño "diagrama": el lead y su escuadrón de samuráis ─────────────────
+
+HELMETS = ("\\_V_/", "\\_Y_/", "/^^^\\", "\\_W_/", ".-^-.")   # kabuto: uno por tipo de subagente
+ARMORS = ("/###\\", "/=#=\\", "/|+|\\", "/[#]\\")
+STEEL = "#d7dde8"   # color de la katana
+BLADE = set("┃━╋╾╍")
+
+
+def samurai(v, phase, i):
+    """Figura de 4 líneas de un subagente; la pose dice qué está haciendo."""
+    seed = sum(map(ord, v["type"]))
+    helm, armor = HELMETS[seed % len(HELMETS)], ARMORS[(seed // 7) % len(ARMORS)]
+    failed = bool(v["end"]) and v["status"] != "completed"
+    if v["running"]:
+        eyes = "[-_-]" if (phase + i * 11) % 31 == 0 else "[o-o]"   # parpadea de vez en cuando
+        if v["tool"] and (phase // 4 + i) % 2:   # trabajando con una herramienta: tajo
+            return [f" {helm}", f" {eyes}", f" {armor}━━━━", "  / \\"]
+        return [f" {helm}  ┃", f" {eyes}  ┃", f" {armor}━╋", "  / \\"]   # en guardia
+    if failed:
+        return [f" {helm.replace(helm[2], 'x')}", " [x-x]", f" {armor} ━ ╍", " _/ \\_"]
+    if v["end"]:
+        return [f" {helm}", " [^-^]", f" {armor}╾─", "  / \\"]   # katana envainada
+    return [f" {helm}", " [-.-] z", f" {armor}", " _/ \\_"]       # interrumpido: dormido
+
+
+def lead_face(state, phase):
+    eyes = {"busy": "[-_-]" if phase % 37 == 0 else "[O-O]", "waiting": "[?-?]",
+            "idle": "[-_-]", "ended": "[-.-]"}.get(state, "[O-O]")
+    return ["\\_W_/", eyes, "/###\\"]
+
+
+def put_figure(cv, x, y, lines, body, steel=STEEL):
+    for r, line in enumerate(lines):
+        cv.put(x, y + r, line, body)
+        cv.tint([(x + c, y + r) for c, ch in enumerate(line) if ch in BLADE], f"bold {steel}")
+
+
+def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     cv = Canvas(w, h)
     if s is None:
         cv.put(2, 2, "sin sesiones todavía — abre Claude Code en otra terminal", DIM)
         return cv.text()
     phase = int(now * 9)
     state = store.state(s)
-    busy = state == "busy"
 
     # advisor
     aw = 22 if w >= 72 else 0
@@ -1225,119 +1260,126 @@ def diagram(store, s, w, compact, now, sel=None, show_all=False):
     else:
         lx = 0
 
-    # lead
+    # lead: su figura a la izquierda, estado y cifras a la derecha
     lw = w - lx
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
     cv.box(lx, 0, lw, 5, lst)
-    inner = lw - 4
-    spin = SPIN[phase % len(SPIN)] if busy else "■"
-    cv.put(lx + 2, 1, trunc(f"{spin} {short_model(s.model)} · lead", inner), f"bold {lst}")
-    label = STATES[state][1]
-    meta = f"{store.label(s)} · {label}" + (f" · effort {s.effort}" if s.effort else "")
-    cv.put(lx + 2, 2, trunc(meta, inner), FG)
-    plain = [p for p in s.pending.values()]
+    put_figure(cv, lx + 2, 1, lead_face(state, phase), f"bold {breath(lst, now) if state == 'waiting' else lst}")
+    tx = lx + 10
+    inner = lw - 12
+    spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
+    right = f"{spin} {STATES[state][1]}"
+    who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
+    cv.put(tx, 1, trunc(who, max(0, inner - len(right) - 2)), f"bold {lst}")
+    cv.put(lx + lw - 2 - len(right), 1, right, f"bold {lst}")
+    stats = f"{s.turns} turnos · {s.tools} tools · salida {ktok(s.out_tokens)}"
+    if s.ctx:
+        stats += f" · contexto {min(100, round(100 * s.ctx / s.window()))}%"
+    if s.cost is not None:
+        stats += f" · ${s.cost:.2f}"
+    cv.put(tx, 2, trunc(stats, inner), DIM)
+    plain = list(s.pending.values())
+    why = store.stuck(s, now)
     if state == "waiting":
-        cv.put(lx + 2, 3, trunc(f"◆ necesita {store.waiting_for(s)}", inner), f"bold {breath(WAIT, now)}")
-    elif store.stuck(s, now):
-        cv.put(lx + 2, 3, trunc("⚠ posible atasco: " + " · ".join(store.stuck(s, now)), inner),
-               f"bold {breath(ERR, now)}")
+        doc = f" · D abre {os.path.basename(s.docs[-1])}" if s.docs else ""
+        cv.put(tx, 3, trunc(f"◆ necesita {store.waiting_for(s)}{doc}", inner), f"bold {breath(WAIT, now)}")
+    elif why:
+        cv.put(tx, 3, trunc("⚠ posible atasco: " + " · ".join(why), inner), f"bold {breath(ERR, now)}")
     elif plain and state != "ended":
-        name, lab, t0 = max(plain, key=lambda p: p[2])
+        name, lab, _ = max(plain, key=lambda p: p[2])
         more = f" (+{len(plain) - 1})" if len(plain) > 1 else ""
-        cv.put(lx + 2, 3, trunc(f"▶ {name}{more}: {lab}", inner), TOOL)
+        cv.put(tx, 3, trunc(f"▶ {name}{more}: {lab}", inner), TOOL)
     else:
-        cv.put(lx + 2, 3, trunc(s.title or "—", inner), DIM)
+        cv.put(tx, 3, trunc(s.title or "—", inner), DIM)
 
-    # subagentes
+    # subagentes: una tarjeta por cada uno, solo las que existen
     everyone = store.agents(s)
     agents = store.visible(s, now, show_all, sel)
-    slots = max(MIN_SLOTS, min(len(agents), (w + 2) // (SLOT_WIDTH + 2)))
-    idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
-    first = max(0, idx - slots + 1) if idx is not None else 0
-    shown = agents[first:first + slots]
-    sgap = 2
-    sw = (w - sgap * (slots - 1)) // slots
-    xs = [i * (sw + sgap) + sw // 2 for i in range(slots)]
     trunk = lx + lw // 2
-    btrunk = w // 2
-    cv.put(trunk, 5, "│", LINE)
-    cv.branch(6, xs, trunk, LINE, down=True)
-    notes, live = [], 0
-    if len(agents) > slots:
-        hidden = agents[:first] + agents[first + slots:]
-        live = sum(1 for v in hidden if v["running"])
-        notes.append(f"+{len(hidden)} más" + (f", {live} en marcha" if live else "") + " · ←→")
+    card_h, sgap = 6, 2
+    rows = 2 if h >= 20 else 1
+    per_row = max(1, (w + sgap) // (34 + sgap))
+    cap = per_row * rows
+    idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
+    first = max(0, idx - cap + 1) if idx is not None and idx >= cap else 0
+    shown = agents[first:first + cap]
+
+    notes, live_hidden = [], 0
+    if len(agents) > len(shown):
+        hidden = agents[:first] + agents[first + cap:]
+        live_hidden = sum(1 for v in hidden if v["running"])
+        notes.append(f"+{len(hidden)} más" + (f", {live_hidden} en marcha" if live_hidden else "") + " · ←→")
     gone = len(everyone) - len(agents)
     if gone:
         notes.append(f"{gone} terminado{'s' if gone != 1 else ''} oculto{'s' if gone != 1 else ''} · t")
     elif show_all and any(not v["running"] for v in everyone):
         notes.append("t oculta terminados")
     if notes:
-        note = trunc(" · ".join(notes), max(0, w - trunk - 2))
-        cv.put(max(0, w - len(note)), 5, note, SWARM if live else DIM)
-    if not compact:
-        cv.branch(15, xs, btrunk, LINE, down=False)
-        cv.put(btrunk, 16, "▼", LINE)
+        note = trunc(" · ".join(notes), w)
+        cv.put(max(0, w - len(note)), h - 1, note, SWARM if live_hidden else DIM)
+
+    if not shown:
+        # dojo vacío: un samurái meditando hasta que el lead cree subagentes
+        if idle_rain == "force" or (idle_rain and not everyone):
+            rain(cv, 6, now)
+        mid = w // 2
+        put_figure(cv, mid - 4, 7, ["\\_V_/", "[-_-]  z" if int(now) % 4 < 2 else "[-_-] z", "_/###\\_"], LINE)
+        msg = "dojo vacío · los subagentes aparecen aquí a medida que el lead los crea"
+        msg = trunc(msg, w - 2)
+        cv.put(max(0, mid - len(msg) // 2), 11, msg, DIM)
+        return cv.text()
+
+    if idle_rain == "force":
+        rain(cv, 6, now)
+    first_row = shown[:per_row]
+    sw = min(48, (w - sgap * (per_row - 1)) // per_row)
+
+    def card_x(col, count):
+        total = count * sw + (count - 1) * sgap
+        return (w - total) // 2 + col * (sw + sgap)
+
+    centers = [card_x(c, len(first_row)) + sw // 2 for c in range(len(first_row))]
+    cv.put(trunk, 5, "│", LINE)
+    if centers == [trunk]:
+        cv.put(trunk, 6, "│", LINE)
+    else:
+        cv.branch(6, centers, trunk, LINE, down=True)
     glow = []
-    for i in range(slots):
-        x = i * (sw + sgap)
-        v = shown[i] if i < len(shown) else None
-        live = v is not None and v["running"]
-        chosen = v is not None and v["id"] == sel
-        cv.put(xs[i], 7, "▼", SWARM if live else LINE)
-        cv.box(x, 8, sw, 6, "bold #ffffff" if chosen else SWARM if live else LINE, heavy=chosen)
-        if not compact:
-            cv.put(xs[i], 14, "│", LINE)
-        if v is None:
-            cv.put(x + 2, 10, trunc("· libre ·", sw - 4), DIM)
-            continue
-        inner = sw - 4
+    for n, v in enumerate(shown):
+        row, col = divmod(n, per_row)
+        # la primera fila va centrada; las siguientes, en las columnas de la primera para colgar de ella
+        count = min(per_row, len(shown)) if row == 0 else per_row
+        x, y = card_x(col, count), 7 + row * (card_h + 1)
+        live = v["running"]
+        chosen = v["id"] == sel
         failed = bool(v["end"]) and v["status"] != "completed"
-        if live:
-            icon, ist = SPIN[(phase + i * 3) % len(SPIN)], f"bold {SWARM}"
-        elif failed:
-            icon, ist = "✗", f"bold {ERR}"
-        elif v["end"]:
-            icon, ist = "✓", f"bold {TOOL}"
-        else:
-            icon, ist = "■", DIM
+        edge = "bold #ffffff" if chosen else ERR if failed else SWARM if live else LINE
+        cv.box(x, y, sw, card_h, edge, heavy=chosen)
+        cx = x + sw // 2
+        if row == 0:
+            cv.put(cx, y, "┴", SWARM if live else LINE)
+            if live:
+                glow.append(([(trunk, 5)] + hpath(trunk, centers[col], 6) + [(cx, y)], SWARM))
+        else:   # cuelga de la tarjeta de arriba
+            cv.put(cx, y - 2, "┬", LINE)
+            cv.put(cx, y - 1, "│", LINE)
+            cv.put(cx, y, "┴", LINE)
+        body = SWARM if live else ERR if failed else TOOL if v["end"] else DIM
+        put_figure(cv, x + 1, y + 1, samurai(v, phase, n), f"bold {body}" if live or chosen else body,
+                   steel=STEEL if live else DIM)
+        ix, inner = x + 12, sw - 14
+        icon, ist = agent_icon(v, phase, n)
+        cv.put(ix, y + 1, icon, ist)
         head = v["type"] + (f" · {v['model']}" if v["model"] else "")
-        cv.put(x + 2, 9, icon, ist)
-        cv.put(x + 4, 9, trunc(head, inner - 2), f"bold {SWARM}" if live else "bold" if chosen else FG)
-        cv.put(x + 2, 10, trunc(v["desc"], inner), FG if live or chosen else DIM)
-        if live and v["tool"]:
-            cv.put(x + 2, 11, trunc(f"▶ {v['tool'][0]}: {v['tool'][1]}", inner), TOOL)
-        elif live:
-            cv.put(x + 2, 11, trunc("pensando…", inner), DIM)
-        else:
-            cv.put(x + 2, 11, trunc(v["response"] or "sin respuesta", inner), FG if chosen else DIM)
-        if live or v["end"]:
-            stats = clock((now if live else v["end"]) - v["start"])
-        else:
-            stats = "interrumpido"
-        stats += f" · {v['tools']} tools" if v["tools"] else ""
-        cv.put(x + 2, 12, trunc(stats, inner), SWARM if live else DIM)
-        if live:
-            glow.append(([(trunk, 5)] + hpath(trunk, xs[i], 6) + [(xs[i], 7)], SWARM))
-        elif not compact and v["end"] and now - v["end"] < 8:
-            glow.append(([(xs[i], 14)] + hpath(xs[i], btrunk, 15) + [(btrunk, 16)], LEAD))
-    # los caminos activos "respiran"; se tiñen al final para que no los pise otra tarjeta
+        cv.put(ix + 2, y + 1, trunc(head, inner - 2), f"bold {SWARM}" if live else "bold" if chosen else FG)
+        cv.put(ix, y + 2, trunc(v["desc"], inner), FG if live or chosen else DIM)
+        text, tst = agent_now(v)
+        cv.put(ix, y + 3, trunc(text, inner), tst)
+        stat = agent_time(v, now) + (f" · {v['tools']} tools" if v["tools"] else "")
+        cv.put(ix, y + 4, trunc(stat, inner), SWARM if live else DIM)
+    # los caminos de los subagentes en marcha "respiran"
     for cells, color in glow:
         cv.tint(cells, f"bold {breath(color, now)}")
-
-    # vuelta al lead
-    if not compact:
-        bw = min(56, w)
-        bx = btrunk - bw // 2
-        cv.box(bx, 17, bw, 4, lst)
-        done = sum(1 for v in everyone if v["end"])
-        cv.put(bx + 2, 18, trunc(f"de vuelta al lead · {done} subagente{'s' if done != 1 else ''} terminado{'s' if done != 1 else ''}", bw - 4), lst)
-        stats = f"{s.turns} turnos · {s.tools} tools · out {ktok(s.out_tokens)} · ctx {ktok(s.ctx)}"
-        if s.ctx:
-            stats += f" ({min(100, round(100 * s.ctx / s.window()))}%)"
-        if s.cost is not None:
-            stats += f" · ${s.cost:.2f}"
-        cv.put(bx + 2, 19, trunc(stats, bw - 4), DIM)
     return cv.text()
 
 
@@ -2677,12 +2719,13 @@ def render(console, store, focus_sid, account, now, ui=None):
         diag = None
     if diag is None:
         inner = max(40, width - side_w - 4)
+        resting = (ui["effects"] and focus is not None and store.state(focus) in ("idle", "ended")
+                   and now - focus.last > 60)
+        storm = now < ui["rain_until"]   # idkfa: llueve aunque haya trabajo
         if ui["layout"] == "diagrama":
-            body = diagram(store, focus, inner, compact, now, ui["sel"], ui["all"])
+            body = diagram(store, focus, inner, dh, now, ui["sel"], ui["all"],
+                           idle_rain="force" if storm else resting)
         else:
-            resting = (ui["effects"] and focus is not None and store.state(focus) in ("idle", "ended")
-                       and now - focus.last > 60)
-            storm = now < ui["rain_until"]   # idkfa: llueve aunque haya trabajo
             body = board(store, focus, inner, dh, now, ui["sel"], ui["all"], ui["layout"],
                          idle_rain="force" if storm else resting)
         diag = Panel(body, box=PANEL_BOX, border_style=LINE,
