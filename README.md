@@ -58,13 +58,18 @@ Las principales:
 
 `d` alterna el panel de agentes entre cinco diseños: `lista`, `tabla`,
 `tarjetas`, `tiempo` y `diagrama`. En `diagrama` cada subagente es una tarjeta
-con un rostro cyberpunk que cuelga del lead: oni, calavera, visor, respirador,
-cíclope o kitsune, uno por tipo de subagente. Las tarjetas aparecen a medida
-que el lead crea subagentes, sin casillas vacías, y caben en una o dos filas
-según la altura. El rostro queda en penumbra y solo se encienden los ojos: en
-rojo, cian, verde ácido o magenta mientras trabaja, con la imagen corrompida a
-ratos cuando usa una herramienta. Al terminar, los ojos se apagan en una línea;
-si falla, el rostro se agrieta y los ojos quedan en `x`.
+con un rostro cyberpunk que cuelga del lead: calavera, oni, visor, respirador,
+kitsune o cíclope, según el tipo de subagente. Los rostros están dibujados con
+puntos de braille tramados, en el color del subagente con brillos cian, y los
+ojos encendidos en un color que contrasta. Las tarjetas aparecen a medida que
+el lead crea subagentes, sin casillas vacías: en una fila con rostros grandes
+o, si no caben, en dos filas con rostros más pequeños. Mientras trabaja, los
+ojos laten (el visor barre de lado a lado) y la imagen se corrompe a ratos
+cuando usa una herramienta. Al terminar, el rostro se apaga; si falla, se
+agrieta y se tiñe de rojo.
+
+Cada subagente tiene un color propio, por orden de creación, que se repite en
+su tarjeta o fila en todos los diseños y en el gráfico de actividad.
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
 prompt) o, si no hay ninguno, la actividad de la sesión: porcentaje de la
@@ -86,10 +91,13 @@ lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.
   un minuto de trabajo o cuando falla un subagente, suena el pitido de la
   terminal, aparece un mensaje en la barra de tmux y queda una línea `aviso`
   en el log. `m` los silencia (`alerts = false` en la configuración).
-- **Pulso:** una línea tipo electrocardiograma con las herramientas que usó
-  la sesión enfocada en los últimos 10 minutos, junto a las herramientas y los
-  tokens por minuto, en la cabecera del lead del panel de agentes (en todos
-  los diseños).
+- **Actividad:** al pie del panel de agentes, en todos los diseños, un
+  gráfico de barras con las herramientas que usó la sesión enfocada en los
+  últimos 10 minutos. Las barras se apilan por quién las usó: el lead en
+  naranja y cada subagente en su color. Cuanto más uso, más intenso el color.
+  La barra de ahora destella con cada herramienta nueva, y el rombo de la
+  leyenda late más rápido cuanto más ritmo hay. La leyenda muestra cuántas
+  herramientas aportó cada uno, más las herramientas y los tokens por minuto.
 - **Temas:** `T` cambia entre `clasico`, `neon`, `matrix` y `ambar`; los tres
   últimos usan un marco tipo HUD (solo esquinas). También `cc-dash --theme neon`.
 

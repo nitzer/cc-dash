@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -113,6 +113,8 @@ STATES = {"waiting": ("◆", "espera tu respuesta", "WAIT"), "busy": ("●", "tr
 
 def state_color(state):
     return THEME[STATES[state][2]]
+# un color por subagente, el mismo en su tarjeta, su fila y el gráfico de actividad
+AGENT_COLORS = ("#ff2a6d", "#05d9e8", "#39ff14", "#ffd319", "#b967ff", "#01ffc3", "#ff71ce", "#7aa2ff")
 MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
 # Umbrales del detector de atascos (solo se evalúa mientras la sesión trabaja)
 STUCK_ERRORS = 3     # resultados con error seguidos
@@ -529,7 +531,8 @@ class Session:
 
     def side_info(self, aid):
         return self.side.setdefault(aid, {"tools": 0, "tool": None, "text": "", "final": "",
-                                          "out": 0, "done": None, "model": "", "last": 0.0})
+                                          "out": 0, "done": None, "model": "", "last": 0.0,
+                                          "beats": deque(maxlen=600)})
 
     def progress(self):
         """(hechas, total, texto de la tarea en curso) de la lista de tareas, o None si no hay."""
@@ -950,6 +953,8 @@ class Store:
                 info["tool"] = (short_tool(name), tool_label(name, inp))
                 info["done"] = None
                 self.count_tool(s, name, inp, ts)
+                if ts:
+                    info["beats"].append(ts)
                 item = s.open_items[b.get("id")] = {
                     "k": "tool", "ts": ts, "name": info["tool"][0], "label": info["tool"][1], "res": None,
                     "more": 0, "err": False, "out": None, "input": clip_input(inp)}
@@ -1009,13 +1014,15 @@ class Store:
         """Subagentes de la sesión con su actividad: en marcha primero, luego recientes."""
         alive = self.state(s) != "ended"
         out = []
-        for a in s.agents:
+        for n, a in enumerate(s.agents):
             aid = a["aid"] or self.aid_of.get(a["id"])
             side = s.side.get(aid) or {}
             end = a["end"] or side.get("done")
             out.append({
                 **a, "aid": aid, "end": end, "running": end is None and alive,
                 "tools": side.get("tools", 0), "tool": side.get("tool"), "out": side.get("out", 0),
+                "color": AGENT_COLORS[n % len(AGENT_COLORS)],   # por orden de creación: no cambia
+                "beats": side.get("beats") or (),
                 "model": a["model"] or (short_model(side["model"]) if side.get("model") else ""),
                 "status": a["status"] or ("completed" if end else ""),
                 "response": (side.get("final") or a["result"] or side.get("text") or "").strip(),
@@ -1192,6 +1199,71 @@ def pulse(beats, now, width, span=600):
     return chars, [levels[i] > 1 or levels[i + 1] > 1 for i in range(0, n, 2)]
 
 
+def graph_rows(h):
+    """Filas que ocupa el gráfico de actividad (leyenda incluida) en un panel de `h` filas."""
+    return 4 if h >= 20 else 3
+
+
+def activity_graph(cv, y, w, h, s, agents, now, span=600):
+    """Barras apiladas de herramientas por minuto: el lead y cada subagente en su color.
+
+    Cuanto más uso, más intenso el color; la columna de ahora late con cada herramienta nueva."""
+    rows = h - 1
+    side = Counter(t for v in agents for t in v["beats"])
+    lead = list((Counter(s.beats) - side).elements())
+    sources = [("lead", LEAD, lead)] + [(v["type"], v["color"], v["beats"]) for v in agents
+                                        if any(0 <= now - t < span for t in v["beats"]) or v["running"]]
+    # barras de 2 columnas, suavizadas con sus vecinas para que se lea como un pulso y no como ruido
+    nb = max(1, w // 2)
+    raw = [[0] * nb for _ in sources]
+    for k, (_, _, beats) in enumerate(sources):
+        for t in beats:
+            back = now - t
+            if 0 <= back < span:
+                raw[k][nb - 1 - int(back / span * nb)] += 1
+    counts = [[(r[b - 1] if b else 0) + 2 * r[b] + (r[b + 1] if b + 1 < nb else 0) for b in range(nb)] for r in raw]
+    totals = [sum(c[b] for c in counts) for b in range(nb)]
+    top = max(totals) or 1
+    last = max((t for _, _, b in sources for t in b), default=0)
+    rate = sum(1 for t in s.beats if 0 <= now - t < 60)
+    # leyenda: un latido que se acelera con el ritmo, quién aporta cuánto y el ritmo total
+    beat = (now * (0.8 + min(3.0, rate / 10))) % 1 < 0.22
+    x = segs(cv, 0, y, [("◆ " if beat else "◇ ", f"bold {LEAD}" if beat else LINE), ("ACTIVIDAD ", f"bold {FG}"),
+                        ("10 min  ", DIM)])
+    for (name, color, beats) in sources:
+        n = sum(1 for t in beats if 0 <= now - t < span)
+        part = f"■ {trunc(name, 14)} {n}  "
+        if x + len(part) > w - 26:
+            break
+        x = segs(cv, x, y, [("■ ", color), (f"{trunc(name, 14)} ", FG), (f"{n}  ", DIM)])
+    right = f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min"
+    cv.put(max(x, w - len(right)), y, right, DIM)
+    fresh = now - last < 1.2
+    off = w - 2 * nb
+    for b in range(nb):
+        col, total = off + 2 * b, totals[b]
+        base = y + rows
+        if not total:
+            cv.put(col, base, "▁▁", LINE)
+            continue
+        height = max(1, round(total / top * rows * 8))
+        k = 0.35 + 0.65 * total / top
+        bounds, acc = [], 0
+        for c in counts:
+            acc += c[b]
+            bounds.append(acc / total * height)
+        for r in range(rows):
+            fill = min(8, height - 8 * r)
+            if fill <= 0:
+                break
+            mid = 8 * r + fill / 2
+            color = sources[next(i for i, b in enumerate(bounds) if mid <= b + 1e-9)][1]
+            style = f"bold {blend(LINE, color, k)}" if k > 0.8 else blend(LINE, color, k)
+            if b == nb - 1 and fresh:   # latido: la barra de ahora destella
+                style = "bold #ffffff"
+            cv.put(col, base - r, " ▁▂▃▄▅▆▇█"[fill] * 2, style)
+
+
 def hpath(x0, x1, y):
     step = 1 if x1 >= x0 else -1
     return [(x, y) for x in range(x0, x1 + step, step)]
@@ -1199,76 +1271,207 @@ def hpath(x0, x1, y):
 
 # ── diseño "diagrama": el lead y un rostro por subagente ────────────────
 
-# rostros de 8x4; "e" marca los ojos (u ópticas), que son lo único que se enciende
-FACES = (
-    ("oni", (" ▲▄▄▄▄▲ ", "▐█e▀▀e█▌", "▐▌▼▼▼▼▐▌", " ▀▚▄▄▞▀ "), "#ff2a3c"),
-    ("calavera", (" ▄████▄ ", "█▀e██e▀█", " ▀█▄▄█▀ ", "  ▐╪╪▌  "), "#ff2a3c"),
-    ("visor", (" ▄▀▀▀▀▄ ", "█▐eeee▌█", "█ ▄▄▄▄ █", " ▀▄██▄▀ "), "#00e5ff"),
-    ("respirador", (" ▄████▄ ", "▐e▀██▀e▌", "▐█▐╬╬▌█▌", " ▀█▀▀█▀ "), "#39ff14"),
-    ("cíclope", (" ▄▄▄▄▄▄ ", "█▓▓▐e▌ █", "█▓▓ ▀▀ █", " ▀▓▄▄▄▀ "), "#ff2a3c"),
-    ("kitsune", ("▲▄    ▄▲", "▐▀e▄▄e▀▌", " ▀▄▐▌▄▀ ", "   ▀▀   "), "#ff2bd6"),
-)
-LEAD_FACE = ("▲▄▄▄▄▲", "█e▀▀e█", " ▀▼▼▀ ")   # el lead: un oni de 3 líneas, cabe en su caja
+# Rostros en braille con tramado ordenado: cada uno es una función que da la luz de
+# cada píxel (0 negro, 1 brillo, EYE ojo encendido, None fondo). Una celda de braille
+# son 2x4 píxeles, así que un rostro de 6 filas tiene 24x24 píxeles.
+EYE = -1.0
+BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+DOTS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
+HIGHLIGHT = "#d1f7ff"   # el brillo cian pálido de la piel / el metal
 
 
-def eye_cells(lines):
-    return [(c, r) for r, line in enumerate(lines) for c, ch in enumerate(line) if ch == "e"]
+def _lit(u, v, cx, cy, a, b):
+    """Luz de un elipsoide iluminado desde arriba; None fuera de él."""
+    du, dv = (u - cx) / a, (v - cy) / b
+    r = du * du + dv * dv
+    if r > 1:
+        return None
+    return max(0.15, min(0.95, 0.08 + 0.8 * (-0.25 * du - 0.45 * dv + 0.85 * math.sqrt(1 - r))))
 
 
-def light_eyes(lines, glyphs):
-    """Cambia cada "e" por el glifo que toca, en orden de lectura."""
-    it = iter(glyphs)
-    return ["".join(next(it, "·") if ch == "e" else ch for ch in line) for line in lines]
+def _in(u, v, cx, cy, a, b):
+    return ((u - cx) / a) ** 2 + ((v - cy) / b) ** 2 <= 1
 
 
-def face(v, phase, i):
-    """Rostro de un subagente. Devuelve (líneas, celdas de los ojos, color de los ojos, fila con glitch)."""
-    _, lines, color = FACES[sum(map(ord, v["type"])) % len(FACES)]
-    cells = eye_cells(lines)
-    n = len(cells)
+def _skull(u, v):
+    for sx in (-1, 1):
+        if _in(u, v, sx * 0.36, 0.02, 0.21, 0.2):
+            return EYE if _in(u, v, sx * 0.36, 0.05, 0.08, 0.09) else 0
+    if 0.22 < v < 0.4 and abs(u) < 0.03 + (v - 0.22) * 0.5:
+        return 0   # nariz
+    s = _lit(u, v, 0, -0.18, 0.8, 0.72)
+    if s is None and abs(u) < 0.42 and 0.3 < v < 0.9:
+        s = 0.7 - 0.3 * abs(u)
+    if s is not None and 0.52 < v < 0.8 and abs(u) < 0.4:
+        s = 0.9 if int((u + 1) * 9) % 2 else 0.02   # dientes
+    return s
+
+
+def _oni(u, v):
+    for sx in (-1, 1):   # cuernos
+        t = (-v - 0.45) / 0.55
+        if 0 <= t <= 1 and abs(u * sx - (0.55 + 0.3 * t)) < 0.14 * (1 - t) + 0.03:
+            return 0.95 - 0.5 * t
+    for sx in (-1, 1):
+        if _in(u, v, sx * 0.32, 0.0, 0.16, 0.08):
+            return EYE
+        if -0.24 < v < -0.06 and 0.1 < u * sx < 0.56 and v > -0.3 + (u * sx - 0.1) * 0.4:
+            return 0.02   # cejas en V
+    if 0.42 < v < 0.74 and abs(u) < 0.46:
+        return 1.0 if abs(abs(u) - 0.3) < 0.07 and v < 0.68 else 0.03   # boca y colmillos
+    return _lit(u, v, 0, 0.05, 0.85, 0.85)
+
+
+def _visor(u, v):
+    if -0.16 < v < 0.08 and abs(u) < 0.8:
+        return EYE if abs(v + 0.04) < 0.06 else 0.04
+    if 0.35 < v < 0.75 and abs(u) < 0.3:
+        return 0.06 if int((u + 1) * 12) % 2 else 0.6   # rejilla
+    return _lit(u, v, 0, 0.0, 0.82, 0.9)
+
+
+def _mask(u, v):
+    for sx in (-1, 1):   # lentes
+        if _in(u, v, sx * 0.36, -0.08, 0.2, 0.2):
+            return EYE if not _in(u, v, sx * 0.36, -0.08, 0.1, 0.1) else 0.04
+    if _in(u, v, 0, 0.55, 0.3, 0.28):
+        return 0.08 if int((v + 1) * 14) % 2 else 0.8   # filtro
+    return _lit(u, v, 0, -0.1, 0.8, 0.82)
+
+
+def _fox(u, v):
+    for sx in (-1, 1):   # orejas
+        t = (-v - 0.3) / 0.7
+        if 0 <= t <= 1 and abs(u * sx - 0.55) < 0.28 * (1 - t):
+            return 0.2 if abs(u * sx - 0.55) < 0.1 * (1 - t) else 0.9 - 0.3 * t
+    if v < -0.35 or v > 0.95 or abs(u) > 0.8 - max(0, v) * 0.75:
+        return None
+    for sx in (-1, 1):   # ojos rasgados
+        if abs(v - (abs(u) - 0.3) * 0.5) < 0.055 and 0.14 < u * sx < 0.52:
+            return EYE
+    if v > 0.6 and abs(u) < 0.06:
+        return 0.04
+    return max(0.12, min(1, 0.95 - 0.5 * (u + 0.2) ** 2 - 0.45 * max(0, v)))
+
+
+def _cyclops(u, v):
+    if _in(u, v, 0.25, -0.05, 0.3, 0.3):   # la óptica
+        if _in(u, v, 0.25, -0.05, 0.12, 0.12):
+            return EYE
+        return 0.9 if _in(u, v, 0.25, -0.05, 0.2, 0.2) else 0.04
+    s = _lit(u, v, 0, 0, 0.82, 0.92)
+    if s is not None and u < -0.05:
+        s = s * 0.55 + (0.3 if int((v + 1) * 7) % 2 else 0)   # placas de metal
+    if s is not None and 0.5 < v < 0.62 and u > -0.05:
+        s = 0.04
+    return s
+
+
+FACES = (("calavera", _skull), ("oni", _oni), ("visor", _visor), ("respirador", _mask),
+         ("kitsune", _fox), ("cíclope", _cyclops))
+FACE_SIZE = {6: (24, 24), 4: (20, 16), 3: (12, 12)}   # filas -> píxeles (ancho, alto)
+_face_px = {}
+
+
+def face_pixels(fn, rows):
+    """Píxeles de un rostro a un tamaño; se calculan una sola vez."""
+    key = (fn, rows)
+    if key not in _face_px:
+        w, h = FACE_SIZE[rows]
+        _face_px[key] = [[fn(((x + 0.5) / w * 2 - 1) * 1.05, ((y + 0.5) / h * 2 - 1) * 1.05)
+                          for x in range(w)] for y in range(h)]
+    return _face_px[key]
+
+
+def dither(px, palette, eyes, scan=None, crack=False):
+    """Pasa los píxeles a celdas de braille [(carácter, estilo)].
+
+    palette: (sombra, medio, brillo) según la luz media de la celda; eyes: estilo de los
+    ojos o None si están apagados; scan: columna que ilumina un visor; crack: rostro roto."""
+    h, w = len(px), len(px[0])
+    out = []
+    for cy in range(h // 4):
+        row = []
+        for cx in range(w // 2):
+            bits, light, n, eye = 0, 0.0, 0, False
+            for dx in range(2):
+                for dy in range(4):
+                    x, y = 2 * cx + dx, 4 * cy + dy
+                    val = px[y][x]
+                    if crack and abs(x - (w // 2 + (y - h // 2) // 3)) < 1:
+                        continue
+                    if val == EYE:
+                        if eyes is not None and (scan is None or abs(x - scan) <= 2):
+                            bits |= DOTS[dx][dy]
+                            eye = True
+                            continue
+                        val = 0.25 if eyes is not None else 0.0
+                    val = val or 0.0
+                    light += val
+                    n += 1
+                    if val > (BAYER[y % 4][x % 4] + 0.5) / 16:
+                        bits |= DOTS[dx][dy]
+            m = light / n if n else 0
+            style = eyes if eye else palette[0] if m < 0.4 else palette[1] if m < 0.78 else palette[2]
+            row.append((chr(0x2800 + bits) if bits else " ", style))
+        out.append(row)
+    return out
+
+
+def eye_color(color):
+    """Ojos que contrasten con el color del rostro: rojo, o cian si el rostro ya es rojizo."""
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#00f0ff" if r > 200 and g < 140 else BLOOD
+
+
+def agent_face(v, phase, i, now, rows):
+    """Rostro tramado de un subagente, en su color; la expresión dice cómo va."""
+    _, fn = FACES[sum(map(ord, v["type"])) % len(FACES)]
+    px = face_pixels(fn, rows)
+    color = v["color"]
     failed = bool(v["end"]) and v["status"] != "completed"
-    glitch = None
+    scan = None
     if v["running"]:
-        if (phase + i * 11) % 41 == 0:   # parpadeo
-            glyphs = "▄" * n
-        elif n == 1:
-            glyphs = "●"
-        elif n == 2:
-            glyphs = "◣◢"   # cejas hacia el centro: mirada hostil
-        else:   # visor: un punto de luz que barre de lado a lado
-            at = (phase // 2 + i) % (2 * n - 2)
-            at = at if at < n else 2 * n - 2 - at
-            glyphs = "".join("█" if k == at else "▒" for k in range(n))
-        if v["tool"] and (phase + i * 5) % 7 < 2:   # usando una herramienta: la imagen se corrompe a ratos
-            glitch = (phase // 3 + i) % len(lines)
+        palette = (blend(LINE, color, 0.5), color, HIGHLIGHT)
+        k = (1 - math.cos(2 * math.pi * (now + i * 0.7) / 1.6)) / 2
+        glow = eye_color(color)
+        eyes = None if (phase + i * 11) % 41 == 0 else f"bold {blend(glow, '#ffffff', 0.5 * k)}"
+        if fn is _visor:   # el visor barre de lado a lado
+            w = len(px[0])
+            at = (phase + i * 3) % (2 * w - 2)
+            scan = at if at < w else 2 * w - 2 - at
     elif failed:
-        glyphs = "x" * n
+        palette, eyes = (blend(LINE, ERR, 0.4), blend(LINE, ERR, 0.75), blend(LINE, "#ffb3b8", 0.6)), f"bold {ERR}"
     elif v["end"]:
-        glyphs = "▬" * n
-    else:
-        glyphs = "·" * n
-    lines = light_eyes(lines, glyphs)
-    if failed:   # rostro roto: una grieta y la mitad derecha deshecha
-        crack = {0: "╻", 1: "╳", 2: "╲", 3: "╲"}
-        lines = ["".join(crack[r] if c == 4 + r // 2 and ch != " " and (c, r) not in cells else
-                         {"█": "▒", "▓": "░", "▄": "░", "▀": "░"}.get(ch, ch) if c > 4 else ch
-                         for c, ch in enumerate(line)) for r, line in enumerate(lines)]
-    if glitch is not None:
-        lines[glitch] = " " + lines[glitch][:-1]
-        cells = [(c + 1 if r == glitch else c, r) for c, r in cells]
-    return lines, cells, color, glitch
+        palette = (blend(LINE, color, 0.2), blend(LINE, color, 0.4), blend(LINE, HIGHLIGHT, 0.45))
+        eyes = blend(LINE, color, 0.55)
+    else:   # interrumpido: apagado
+        palette, eyes = (LINE, LINE, blend(LINE, FG, 0.3)), None
+    cells = dither(px, palette, eyes, scan, crack=failed)
+    if v["running"] and v["tool"] and (phase + i * 5) % 7 < 2:   # señal corrupta mientras usa una herramienta
+        g = (phase // 3 + i) % len(cells)
+        accent = "#ff2a6d" if color == "#05d9e8" else "#05d9e8"
+        cells[g] = [(" ", "")] + [(ch, accent) for ch, _ in cells[g][:-1]]
+    return cells
 
 
-def lead_face(state, phase):
-    glyphs = {"busy": "▄▄" if phase % 37 == 0 else "◣◢", "waiting": "◆◆", "idle": "▬▬", "ended": "··"}.get(state, "◣◢")
-    return light_eyes(LEAD_FACE, glyphs), eye_cells(LEAD_FACE)
+def lead_face(state, now):
+    px = face_pixels(_oni, 3)
+    if state == "ended":
+        return dither(px, (LINE, LINE, blend(LINE, FG, 0.3)), None)
+    k = (1 - math.cos(2 * math.pi * now / 1.6)) / 2
+    eyes = f"bold {blend(WAIT if state == 'waiting' else BLOOD, '#ffffff', 0.3 * k)}"
+    return dither(px, (blend(LINE, LEAD, 0.5), LEAD, "#ffe0c2"), eyes if state != "idle" else blend(LINE, BLOOD, 0.6))
 
 
-def put_figure(cv, x, y, lines, body, cells=(), eyes=None, glitch=None, accent=None):
-    for r, line in enumerate(lines):
-        cv.put(x, y + r, line, accent if r == glitch and accent else body)
-    if eyes:
-        cv.tint([(x + c, y + r) for c, r in cells], eyes)
+BLOOD = "#ff2a3c"
+
+
+def put_cells(cv, x, y, cells):
+    for r, row in enumerate(cells):
+        for c, (ch, style) in enumerate(row):
+            if ch != " ":
+                cv.put(x + c, y + r, ch, style)
 
 
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
@@ -1301,10 +1504,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     lw = w - lx
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
     cv.box(lx, 0, lw, 5, lst)
-    lines, cells = lead_face(state, phase)
-    lit = WAIT if state == "waiting" else FACES[0][2] if state in ("busy", "idle") else None
-    put_figure(cv, lx + 2, 1, lines, blend(LINE, lst, 0.6), cells,
-               eyes=f"bold {breath(lit, now)}" if lit else None)
+    put_cells(cv, lx + 2, 1, lead_face(state, now))
     tx = lx + 10
     inner = lw - 12
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
@@ -1312,16 +1512,12 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
     cv.put(tx, 1, trunc(who, max(0, inner - len(right) - 2)), f"bold {lst}")
     cv.put(lx + lw - 2 - len(right), 1, right, f"bold {lst}")
-    pw = max(8, min(20, inner // 4))
-    for i, (ch, peak) in enumerate(zip(*pulse(s.beats, now, pw))):
-        cv.put(tx + i, 2, ch, lst if peak else LINE)
-    rate = sum(1 for t in s.beats if 0 <= now - t < 60)
-    stats = f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min · {s.turns} turnos"
+    stats = f"{s.turns} turnos · {s.tools} tools · salida {ktok(s.out_tokens)}"
     if s.ctx:
         stats += f" · contexto {min(100, round(100 * s.ctx / s.window()))}%"
     if s.cost is not None:
         stats += f" · ${s.cost:.2f}"
-    cv.put(tx + pw + 2, 2, trunc(stats, max(0, inner - pw - 2)), DIM)
+    cv.put(tx, 2, trunc(stats, inner), DIM)
     plain = list(s.pending.values())
     why = store.stuck(s, now)
     if state == "waiting":
@@ -1339,10 +1535,19 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     # subagentes: una tarjeta por cada uno, solo las que existen
     everyone = store.agents(s)
     agents = store.visible(s, now, show_all, sel)
+    gh = graph_rows(h)
+    activity_graph(cv, h - gh, w, gh, s, everyone, now)
+    h -= gh   # las tarjetas y las notas quedan por encima del gráfico
     trunk = lx + lw // 2
-    card_h, sgap = 6, 2
-    rows = 2 if h >= 20 else 1
-    per_row = max(1, (w + sgap) // (34 + sgap))
+    # rostros grandes en una fila; si no caben todos y hay sitio para dos filas, más pequeños
+    face_rows = 6 if h >= 7 + 8 + 1 else 4
+    if face_rows == 6 and len(agents) > max(1, (w + 2) // (FACE_SIZE[6][0] // 2 + 28)) and h >= 7 + 2 * 6 + 2:
+        face_rows = 4
+    fw = FACE_SIZE[face_rows][0] // 2
+    card_h, sgap = face_rows + 2, 2
+    rows = 2 if h >= 7 + 2 * card_h + 2 else 1
+    top = 7 if h >= 7 + card_h + 1 else 5   # en paneles bajos las tarjetas suben y se quitan las ramas
+    per_row = max(1, (w + sgap) // (fw + 26 + sgap))
     cap = per_row * rows
     idx = next((i for i, v in enumerate(agents) if v["id"] == sel), None)
     first = max(0, idx - cap + 1) if idx is not None and idx >= cap else 0
@@ -1365,66 +1570,72 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
     if not shown:
         # dojo vacío: un samurái meditando hasta que el lead cree subagentes
         if idle_rain == "force" or (idle_rain and not everyone):
-            rain(cv, 6, now)
+            rain(cv, 6, now, h)
         mid = w // 2
-        put_figure(cv, mid - 4, 7, light_eyes(FACES[2][1], "····"), LINE)
+        size = 6 if h >= 15 else 4
+        put_cells(cv, mid - FACE_SIZE[size][0] // 4, 7, dither(face_pixels(_visor, size),
+                                                              (LINE, LINE, blend(LINE, FG, 0.35)), None))
         msg = "sin subagentes · sus rostros aparecen aquí a medida que el lead los invoca"
         msg = trunc(msg, w - 2)
-        cv.put(max(0, mid - len(msg) // 2), 11, msg, DIM)
+        cv.put(max(0, mid - len(msg) // 2), 7 + size + 1, msg, DIM)
         return cv.text()
 
     if idle_rain == "force":
-        rain(cv, 6, now)
+        rain(cv, 6, now, h)
     first_row = shown[:per_row]
-    sw = min(48, (w - sgap * (per_row - 1)) // per_row)
+    sw = min(fw + 40, (w - sgap * (per_row - 1)) // per_row)
 
     def card_x(col, count):
         total = count * sw + (count - 1) * sgap
         return (w - total) // 2 + col * (sw + sgap)
 
     centers = [card_x(c, len(first_row)) + sw // 2 for c in range(len(first_row))]
-    cv.put(trunk, 5, "│", LINE)
-    if centers == [trunk]:
-        cv.put(trunk, 6, "│", LINE)
-    else:
-        cv.branch(6, centers, trunk, LINE, down=True)
+    if top == 7:
+        cv.put(trunk, 5, "│", LINE)
+        if centers == [trunk]:
+            cv.put(trunk, 6, "│", LINE)
+        else:
+            cv.branch(6, centers, trunk, LINE, down=True)
     glow = []
     for n, v in enumerate(shown):
         row, col = divmod(n, per_row)
         # la primera fila va centrada; las siguientes, en las columnas de la primera para colgar de ella
         count = min(per_row, len(shown)) if row == 0 else per_row
-        x, y = card_x(col, count), 7 + row * (card_h + 1)
+        x, y = card_x(col, count), top + row * (card_h + 1)
         live = v["running"]
         chosen = v["id"] == sel
         failed = bool(v["end"]) and v["status"] != "completed"
-        edge = "bold #ffffff" if chosen else ERR if failed else SWARM if live else LINE
+        edge = "bold #ffffff" if chosen else ERR if failed else v["color"] if live else LINE
         cv.box(x, y, sw, card_h, edge, heavy=chosen)
         cx = x + sw // 2
         if row == 0:
-            cv.put(cx, y, "┴", SWARM if live else LINE)
-            if live:
-                glow.append(([(trunk, 5)] + hpath(trunk, centers[col], 6) + [(cx, y)], SWARM))
+            if top == 7:
+                cv.put(cx, y, "┴", v["color"] if live else LINE)
+                if live:
+                    glow.append(([(trunk, 5)] + hpath(trunk, centers[col], 6) + [(cx, y)], v["color"]))
         else:   # cuelga de la tarjeta de arriba
             cv.put(cx, y - 2, "┬", LINE)
             cv.put(cx, y - 1, "│", LINE)
             cv.put(cx, y, "┴", LINE)
-        # el rostro queda en penumbra; solo se encienden los ojos
-        lines, cells, lit, glitch = face(v, phase, n)
-        body = blend(LINE, SWARM, 0.55) if live else blend(LINE, ERR, 0.6) if failed else LINE
-        put_figure(cv, x + 2, y + 1, lines, f"bold {body}" if chosen else body, cells,
-                   eyes=f"bold {breath(lit, now, n * 0.7)}" if live else f"bold {ERR}" if failed
-                   else blend(LINE, lit, 0.35) if v["end"] else None,
-                   glitch=glitch, accent=blend(LINE, lit, 0.7))
-        ix, inner = x + 12, sw - 14
+        put_cells(cv, x + 2, y + 1, agent_face(v, phase, n, now, face_rows))
+        ix, inner = x + fw + 4, sw - fw - 6
         icon, ist = agent_icon(v, phase, n)
         cv.put(ix, y + 1, icon, ist)
         head = v["type"] + (f" · {v['model']}" if v["model"] else "")
-        cv.put(ix + 2, y + 1, trunc(head, inner - 2), f"bold {SWARM}" if live else "bold" if chosen else FG)
-        cv.put(ix, y + 2, trunc(v["desc"], inner), FG if live or chosen else DIM)
+        cv.put(ix + 2, y + 1, trunc(head, inner - 2), f"bold {v['color']}" if live else "bold" if chosen else FG)
+        # con rostro grande sobra sitio: la tarea ocupa dos líneas
+        desc = textwrap.wrap(v["desc"], inner) or [""]
+        if face_rows >= 6 and len(desc) > 1:
+            cv.put(ix, y + 2, desc[0], FG if live or chosen else DIM)
+            cv.put(ix, y + 3, trunc(" ".join(desc[1:]), inner), FG if live or chosen else DIM)
+            line = y + 4
+        else:
+            cv.put(ix, y + 2, trunc(v["desc"], inner), FG if live or chosen else DIM)
+            line = y + 3
         text, tst = agent_now(v)
-        cv.put(ix, y + 3, trunc(text, inner), tst)
+        cv.put(ix, line, trunc(text, inner), tst)
         stat = agent_time(v, now) + (f" · {v['tools']} tools" if v["tools"] else "")
-        cv.put(ix, y + 4, trunc(stat, inner), SWARM if live else DIM)
+        cv.put(ix, line + 1, trunc(stat, inner), v["color"] if live else DIM)
     # los caminos de los subagentes en marcha "respiran"
     for cells, color in glow:
         cv.tint(cells, f"bold {breath(color, now)}")
@@ -1446,7 +1657,7 @@ def segs(cv, x, y, parts):
 
 def agent_icon(v, phase, i=0):
     if v["running"]:
-        return SPIN[(phase + i * 3) % len(SPIN)], f"bold {SWARM}"
+        return SPIN[(phase + i * 3) % len(SPIN)], f"bold {v['color']}"
     if v["end"] and v["status"] != "completed":
         return "✗", f"bold {ERR}"
     if v["end"]:
@@ -1479,8 +1690,8 @@ def agent_time(v, now):
 
 def agent_bar_style(v, now):
     if v["running"]:
-        return f"bold {breath(SWARM, now)}"
-    return ERR if v["end"] and v["status"] != "completed" else DONE
+        return f"bold {breath(v['color'], now)}"
+    return ERR if v["end"] and v["status"] != "completed" else blend(LINE, v["color"], 0.45)
 
 
 def lead_block(cv, store, s, w, now, phase, compact=False):
@@ -1494,12 +1705,7 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     if compact:
         left = f"{short_model(s.model)} · contexto {pct}%" + (f" · ${s.cost:.2f}" if s.cost is not None else "")
         x = segs(cv, 0, 0, [("LEAD  ", f"bold {color}")])
-        pw = 16 if w - x - len(right) - len(left) > 24 else 0
-        cv.put(x, 0, trunc(left, max(0, w - x - len(right) - pw - 4)), "bold")
-        if pw:
-            px = w - len(right) - pw - 2
-            for i, (ch, peak) in enumerate(zip(*pulse(s.beats, now, pw))):
-                cv.put(px + i, 0, ch, color if peak else LINE)
+        cv.put(x, 0, trunc(left, max(0, w - x - len(right) - 2)), "bold")
         cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
         return 2
     x = segs(cv, 0, 0, [("LEAD  ", f"bold {color}")])
@@ -1529,30 +1735,20 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     if s.advisor:
         extra.append(f"advisor {short_model(s.advisor)}")
     cv.put(x + 3, 2, trunc(" · ".join(extra), max(0, w - x - 3)), DIM)
-    bw = max(10, min(48, w - 44))
-    x = segs(cv, 0, 3, [("pulso    ", DIM)])
-    chars, hot = pulse(s.beats, now, bw)
-    for i, (ch, peak) in enumerate(zip(chars, hot)):
-        cv.put(x + i, 3, ch, color if peak else LINE)
-    rate = sum(1 for t in s.beats if 0 <= now - t < 60)
-    last = max(s.beats) if s.beats else 0
-    cv.put(x + bw + 2, 3, trunc(f"{rate} tools/min · {ktok(round(s.token_rate(now)))} tok/min"
-                                + (f" · última hace {age(now - last)}" if last else ""),
-                                max(0, w - x - bw - 2)), DIM)
     tasks = s.progress()
     if tasks:
         done, total, doing = tasks
         fill = round(done / total * 12)
         just = next((t for t in s.todos.values() if now - t.get("flash", 0) < FRESH), None)
         glow = f"bold {breath(TOOL, now * 3)}"
-        x = segs(cv, 0, 4, [("tareas   ", DIM), ("▰" * fill, glow if just else TOOL), ("▱" * (12 - fill), LINE),
+        x = segs(cv, 0, 3, [("tareas   ", DIM), ("▰" * fill, glow if just else TOOL), ("▱" * (12 - fill), LINE),
                             (f" {done}/{total}", FG)])
         if just:   # una tarea acaba de terminar: se anuncia aquí unos segundos
-            cv.put(x + 3, 4, trunc(f"✦ terminada: {just['subject']}", max(0, w - x - 3)), glow)
+            cv.put(x + 3, 3, trunc(f"✦ terminada: {just['subject']}", max(0, w - x - 3)), glow)
         else:
-            cv.put(x + 3, 4, trunc(f"▶ {doing}" if doing else "", max(0, w - x - 3)), TOOL)
-        return 6
-    return 5
+            cv.put(x + 3, 3, trunc(f"▶ {doing}" if doing else "", max(0, w - x - 3)), TOOL)
+        return 5
+    return 4
 
 
 def time_window(agents, now, floor=1800):
@@ -1616,7 +1812,10 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
     phase = int(now * 9)
     everyone = store.agents(s)
     agents = store.visible(s, now, show_all, sel)
-    y = lead_block(cv, store, s, w, now, phase, compact=layout == "tiempo" or h < 18)
+    gh = graph_rows(h)
+    activity_graph(cv, h - gh, w, gh, s, everyone, now)
+    h -= gh + 1   # el resto del panel queda por encima del gráfico
+    y = lead_block(cv, store, s, w, now, phase, compact=layout == "tiempo" or h < 14)
     empty = "sin subagentes en uso" + (" — t muestra los terminados" if everyone else "")
 
     if layout == "tabla":
@@ -1637,7 +1836,7 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
                 cv.put(0, row, "▸" + " " * (w - 1), f"bold {LEAD} on {CARD_BG}")
             bg = f" on {CARD_BG}" if chosen else ""
             cv.put(2, row, icon, ist + bg)
-            cv.put(4, row, trunc(v["type"], 11), (f"bold {SWARM}" if v["running"] else base) + bg)
+            cv.put(4, row, trunc(v["type"], 11), (f"bold {v['color']}" if v["running"] else base) + bg)
             cv.put(16, row, trunc(v["model"] or "—", 10), base + bg)
             cv.put(27, row, trunc(v["desc"], c_task - 1), base + bg)
             cv.put(27 + c_task, row, trunc(text, c_now - 1), tst + bg)
@@ -1654,16 +1853,16 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
             x, top = (i % per_row) * (cw + 2), y + 1 + (i // per_row) * 5
             chosen = v["id"] == sel
             failed = bool(v["end"]) and v["status"] != "completed"
-            edge = "bold #ffffff" if chosen else breath(SWARM, now) if v["running"] else ERR if failed else LINE
+            edge = "bold #ffffff" if chosen else breath(v["color"], now) if v["running"] else ERR if failed else LINE
             cv.box(x, top, cw, 5, edge, heavy=chosen)
             icon, ist = agent_icon(v, phase, i)
             head = trunc(v["type"] + (f" · {v['model']}" if v["model"] else ""), cw - 9)
-            segs(cv, x + 2, top, [(" ", ""), (icon, ist), (f" {head} ", f"bold {SWARM}" if v["running"] else "bold")])
+            segs(cv, x + 2, top, [(" ", ""), (icon, ist), (f" {head} ", f"bold {v['color']}" if v["running"] else "bold")])
             text, tst = agent_now(v)
             cv.put(x + 2, top + 1, trunc(v["desc"], cw - 4), FG if v["running"] or chosen else DIM)
             cv.put(x + 2, top + 2, trunc(text, cw - 4), tst)
             cv.put(x + 2, top + 3, trunc(f"{agent_time(v, now)} · {n_tools(v['tools'])}", cw - 4),
-                   SWARM if v["running"] else DIM)
+                   v["color"] if v["running"] else DIM)
         if not shown:
             cv.put(2, y + 2, empty, DIM)
 
@@ -1689,7 +1888,7 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
             row, chosen = y + 4 + i * 2, v["id"] == sel
             icon, ist = agent_icon(v, phase, i)
             segs(cv, 0, row, [("▸ " if chosen else "  ", f"bold {LEAD}"), (icon + " ", ist),
-                              (trunc(v["type"], lw - 5), "bold" if chosen or v["running"] else DIM)])
+                              (trunc(v["type"], lw - 5), f"bold {v['color']}" if v["running"] else "bold" if chosen else DIM)])
             time_bar(cv, lw, row, bw, t0, t1, v["start"], v["end"], agent_bar_style(v, now), v["running"])
             text, tst = agent_now(v)
             cv.put(lw, row + 1, trunc(f"{v['desc']} · {text} · {agent_time(v, now)}", bw),
@@ -1715,7 +1914,7 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
             icon, ist = agent_icon(v, phase, i)
             base = "bold" if chosen else FG if v["running"] else DIM
             x = segs(cv, 0, row, [("▸ " if chosen else "  ", f"bold {LEAD}"), (icon + " ", ist),
-                                  (f"{trunc(v['type'], 11):<12}", f"bold {SWARM}" if v["running"] else base),
+                                  (f"{trunc(v['type'], 11):<12}", f"bold {v['color']}" if v["running"] else base),
                                   (f"{trunc(v['model'] or '—', 9):<10}", base)])
             cv.put(x, row, trunc(v["desc"], max(0, bx - x - 2)), base)
             time_bar(cv, bx, row, bw, t0, t1, v["start"], v["end"], agent_bar_style(v, now), v["running"])
@@ -1726,9 +1925,9 @@ def board(store, s, w, h, now, sel=None, show_all=False, layout="lista", idle_ra
         if not shown:
             cv.put(2, y + 2, empty, DIM)
     if idle_rain == "force":
-        rain(cv, y, now)
+        rain(cv, y, now, h)
     elif idle_rain and not agents:
-        rain(cv, y + 4, now)
+        rain(cv, y + 4, now, h)
     return cv.text()
 
 
@@ -1746,10 +1945,10 @@ def glitched(text, now):
     return out
 
 
-def rain(cv, top, now):
-    """Lluvia de caracteres en las celdas vacías a partir de la fila `top`: el modo reposo."""
+def rain(cv, top, now, bottom=None):
+    """Lluvia de caracteres en las celdas vacías entre las filas `top` y `bottom`: el modo reposo."""
     glyphs = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉ0123456789"
-    span = cv.h - top
+    span = (bottom or cv.h) - top
     if span < 3:
         return
     for x in range(0, cv.w, 2):
@@ -2756,7 +2955,7 @@ def render(console, store, focus_sid, account, now, ui=None):
     by_id = {s.sid: s for s in sessions}
     focus = by_id.get(focus_sid) or store.auto_focus(sessions)
     compact = height < 34
-    dh = 15 if compact else 21
+    dh = 15 if compact else 21 if height < 46 else 25
     wide = width >= 108
     side_w = 34 if wide else 0
     rows = max(1, height - 3 - (dh + 2) - 1 - 2)
