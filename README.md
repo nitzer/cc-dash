@@ -133,6 +133,12 @@ diseño `diagrama` van debajo de su rostro:
   cresta, EVO II implantes que brillan con los ojos, EVO III un halo y EVO MAX
   brillos dorados. Cada evolución se anuncia con un toast.
 
+**`L`** abre la ventana de evoluciones: un rostro por vez, en grande y
+animado. `h`/`l` cambian de personaje, `j`/`k` bajan o suben de evolución, y
+la escalera de la derecha dice qué niveles abarca cada una y qué gana el
+rostro. Abajo indica qué tipos de subagente de la sesión llevan ese rostro.
+Si hay un subagente seleccionado, la ventana abre en su rostro y su evolución.
+
 El número exacto de rondas aparece junto al agente (`23 rondas`), en la fila
 del lead (`23 rondas · nivel 3, sube en 7`) y en el panel de actividad. Los
 demás diseños muestran HP, LV y XP en la cabecera del lead. Si no caben las

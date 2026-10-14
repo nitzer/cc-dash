@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.40.0"
+__version__ = "0.41.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1394,7 +1394,7 @@ def _cyclops(u, v):
 
 FACES = (("calavera", _skull), ("oni", _oni), ("visor", _visor), ("respirador", _mask),
          ("kitsune", _fox), ("cíclope", _cyclops))
-FACE_SIZE = {6: (24, 24), 4: (20, 16), 3: (12, 12)}   # filas -> píxeles (ancho, alto)
+FACE_SIZE = {10: (40, 40), 6: (24, 24), 4: (20, 16), 3: (12, 12)}   # filas -> píxeles (ancho, alto)
 _face_px = {}
 
 
@@ -1473,9 +1473,9 @@ def eye_color(color):
     return "#00f0ff" if r > 200 and g < 140 else BLOOD
 
 
-def agent_face(v, phase, i, now, rows, tier=0):
+def agent_face(v, phase, i, now, rows, tier=0, fn=None):
     """Rostro tramado de un subagente, en su color; la expresión dice cómo va."""
-    _, fn = FACES[sum(map(ord, v["type"])) % len(FACES)]
+    fn = fn or FACES[sum(map(ord, v["type"])) % len(FACES)][1]
     px = face_pixels(fn, rows, tier)
     color = v["color"]
     failed = bool(v["end"]) and v["status"] != "completed"
@@ -1532,6 +1532,54 @@ def agent_game(v):
 
 
 EVO = ("", "EVO I", "EVO II", "EVO III", "EVO MAX")
+EVO_GAIN = ("el rostro de partida", "una cresta en punta sobre la frente",
+            "implantes en las mejillas que brillan con los ojos", "un halo de puntos sobre la cabeza",
+            "brillos dorados en lugar de cian")
+
+
+def gallery_panel(view, store, focus, now, width, max_rows=40):
+    """Ventana de evoluciones (tecla L): un personaje por vez, con h/l y j/k."""
+    k = view["face"] % len(FACES)
+    tier = max(0, min(4, view["tier"]))
+    name, fn = FACES[k]
+    color = AGENT_COLORS[k % len(AGENT_COLORS)]
+    v = {"type": name, "color": color, "running": True, "tool": None, "end": None, "status": ""}
+    cells = agent_face(v, int(now * 9), 0, now, 10 if max_rows >= 26 else 6, tier, fn)   # grande si cabe
+    inner = width - 4
+    body = Text(no_wrap=True, overflow="ellipsis")
+    nav = Text(no_wrap=True)
+    nav.append("◀ h   ", style=DIM)
+    nav.append(f" {name.upper()} ", style=f"bold reverse {color}")
+    nav.append(f"   l ▶     {k + 1}/{len(FACES)}", style=DIM)
+    nav.align("center", inner)
+    body.append_text(nav)
+    body.append("\n\n")
+    face_w = len(cells[0])
+    pad = " " * max(0, (inner - face_w) // 2)
+    for row in cells:
+        body.append(pad)
+        for ch, style in row:
+            body.append(ch, style=style or None)
+        body.append("\n")
+    body.append("\n")
+    for t in range(4, -1, -1):   # la escalera de evoluciones, la más alta arriba
+        lo = max(1, t * 10)
+        span = f"LV {lo}+" if t == 4 else f"LV {lo}–{t * 10 + 9}"
+        picked = t == tier
+        line = Text(no_wrap=True)
+        line.append(" ▸ " if picked else "   ", style=f"bold {color}")
+        line.append(f"{EVO[t] or 'BASE':<8}", style=f"bold {color}" if picked else FG if t < tier else DIM)
+        line.append(f"{span:<11}", style=FG if picked else DIM)
+        line.append(EVO_GAIN[t], style=FG if picked else DIM)
+        body.append_text(line)
+        body.append("\n")
+    users = sorted({v2["type"] for v2 in (store.agents(focus) if focus else [])
+                    if sum(map(ord, v2["type"])) % len(FACES) == k})
+    body.append("\n " + (f"lo llevan en esta sesión: {', '.join(users)}" if users
+                          else "ningún subagente de esta sesión lleva este rostro"), style=DIM)
+    return Panel(body, title=label("evoluciones", "EVO"), title_align="left", box=box.HEAVY,
+                 border_style=f"bold {color}", style=f"on {CARD_BG}", width=width,
+                 subtitle="h/l personaje · j/k evolución · Esc cierra", subtitle_align="right")
 
 
 def hp_color(hp):
@@ -2868,6 +2916,7 @@ KEYS = [
     ]),
     ("Apariencia y ajustes", [
         ("d", "diseño del panel de agentes"),
+        ("L", "evoluciones de cada rostro (h/l personaje, j/k nivel)"),
         ("T", "tema de colores"),
         ("E", "efectos visuales"),
         (",", "configuración: ajustes y cuentas"),
@@ -3119,6 +3168,8 @@ def news_panel(store, ui, rows, width, now):
 def mode_hint(ui):
     if ui["help"] is not None:
         return "teclas · cualquier tecla cierra"
+    if ui["gallery"] is not None:
+        return "evoluciones · h/l personaje · j/k evolución · Esc cierra"
     if ui["entry"] is not None:
         return "detalle · j/k desplaza · gg/G principio/final · y copia · Esc o Enter cierra"
     free = ui["log"] is None and ui["typing"] is None and ui["settings"] is None and ui["session"] is None
@@ -3153,6 +3204,7 @@ def new_ui():
             "g_at": 0.0,                  # cuándo llegó una g, para reconocer gg
             "entry": None,                # entrada del log abierta en ventana flotante (Enter)
             "tiers": {},                  # evolución vista de cada agente, para anunciar las nuevas
+            "gallery": None,              # ventana de evoluciones (L): {"face", "tier"}
             "layout": "lista",  # diseño del panel de agentes (tecla d)
             "theme": "clasico", "alerts": True, "effects": True,
             "cheat": "", "cheat_at": 0.0, "cheat_undo": None,   # lo tecleado hacia un truco
@@ -3270,6 +3322,9 @@ def render(console, store, focus_sid, account, now, ui=None):
     elif ui["settings"] is not None:
         modal_w = min(66, width - 2)
         modal = settings_panel(ui["cfg"], store, ui["settings"], modal_w, height - 4)
+    elif ui["gallery"] is not None:   # evoluciones de los rostros (tecla L)
+        modal_w = min(84, width - 2)
+        modal = gallery_panel(ui["gallery"], store, focus, now, modal_w, height - 2)
     elif ui["entry"] is not None:   # detalle de una entrada del log, en ventana flotante
         modal_w = min(120, width - 4)
         modal = event_panel(store, ui["entry"]["e"], ui["entry"], max(8, height - 6), modal_w, now)
@@ -3904,6 +3959,27 @@ def run(accounts, once, cfg):
                     continue
                 if keys == b"?" and ui["settings"] is None:
                     ui["help"] = {"top": 0, "rows": 1}
+                    continue
+                if ui["gallery"] is not None:
+                    # evoluciones: h/l cambian de personaje, j/k de evolución
+                    gv = ui["gallery"]
+                    if keys in (b"\x1b", b"q", b"L", b"\r", b"\n"):
+                        ui["gallery"] = None
+                    elif keys == b"\x03":
+                        break
+                    elif keys in (b"l", b"\x1b[C"):
+                        gv["face"] = (gv["face"] + 1) % len(FACES)
+                    elif keys in (b"h", b"\x1b[D"):
+                        gv["face"] = (gv["face"] - 1) % len(FACES)
+                    elif keys in (b"k", b"\x1b[A"):
+                        gv["tier"] = min(4, gv["tier"] + 1)
+                    elif keys in (b"j", b"\x1b[B"):
+                        gv["tier"] = max(0, gv["tier"] - 1)
+                    continue
+                if keys == b"L" and ui["settings"] is None and ui["help"] is None:
+                    sel_v = next((v for v in store.agents(focus) if v["id"] == ui["sel"]), None) if focus else None
+                    start = sum(map(ord, sel_v["type"])) % len(FACES) if sel_v else 0
+                    ui["gallery"] = {"face": start, "tier": agent_game(sel_v)["tier"] if sel_v else 0}
                     continue
                 if ui["entry"] is not None:
                     # ventana flotante con el detalle de una entrada del log
