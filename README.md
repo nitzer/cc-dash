@@ -47,6 +47,21 @@ agrupadas por tema; cualquier tecla la cierra. La barra inferior muestra solo
 el estado de la sesión enfocada y los atajos esenciales (`? ayuda · , config ·
 q salir`), más los propios del modo en que estés.
 
+**Paneles:** `Tab` pasa el foco del teclado al panel siguiente (`Shift+Tab` al
+anterior), en este orden: sesiones, agentes, session log y panel derecho. El
+panel con el foco lleva el borde en color. Dentro de él, `j`/`k` (o las
+flechas) se mueven, `gg` va al primero y `G` al último:
+
+- **sesiones:** cambia de sesión; `Enter` salta a su panel de tmux.
+- **agentes:** elige subagente (al entrar se elige el primero); `Enter` activa
+  el modo foco sobre él.
+- **session log:** mueve el cursor por las entradas; `l` o `Enter` abre el
+  detalle a la derecha.
+- **panel derecho:** en la actividad, un cursor recorre las líneas y `Enter`
+  despliega o pliega la lista bajo el cursor (herramientas, archivos, skills…)
+  para verla entera. En respuestas, prompts, tareas o novedades, `j`/`k`
+  desplazan el texto.
+
 Las principales:
 
 - `↑`/`↓` o `j`/`k`: cambia de sesión · `a`: vuelve al modo automático
