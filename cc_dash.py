@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.31.0"
+__version__ = "0.30.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1271,148 +1271,149 @@ def hpath(x0, x1, y):
 
 # ── diseño "diagrama": el lead y un rostro por subagente ────────────────
 
-# Rostros en braille: piezas angulares (polígonos en una rejilla de 24x24) con relleno
-# plano o tramado fijo, como placas de una armadura. Tonos: 0 hueco, 1 tramado ralo,
-# 2 tramado a cuadros, 3 color lleno, 4 brillo, EYE ojo. Las piezas con `mirror`
-# se repiten reflejadas, así que basta con dibujar la mitad izquierda.
-EYE = -1
+# Rostros en braille con tramado ordenado: cada uno es una función que da la luz de
+# cada píxel (0 negro, 1 brillo, EYE ojo encendido, None fondo). Una celda de braille
+# son 2x4 píxeles, así que un rostro de 6 filas tiene 24x24 píxeles.
+EYE = -1.0
+BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
 DOTS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
-HIGHLIGHT = "#d1f7ff"   # el brillo cian pálido del metal
+HIGHLIGHT = "#d1f7ff"   # el brillo cian pálido de la piel / el metal
 
 
-def _rect(x0, y0, x1, y1):
-    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+def _lit(u, v, cx, cy, a, b):
+    """Luz de un elipsoide iluminado desde arriba; None fuera de él."""
+    du, dv = (u - cx) / a, (v - cy) / b
+    r = du * du + dv * dv
+    if r > 1:
+        return None
+    return max(0.15, min(0.95, 0.08 + 0.8 * (-0.25 * du - 0.45 * dv + 0.85 * math.sqrt(1 - r))))
 
 
-def _ring(cx, cy, r, n=10):
-    return [(cx + r * math.cos(2 * math.pi * k / n), cy + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+def _in(u, v, cx, cy, a, b):
+    return ((u - cx) / a) ** 2 + ((v - cy) / b) ** 2 <= 1
 
 
-FACES = (
-    ("ronin", True, [   # kabuto con cuernos en V y mempo con ranuras
-        (4, [(1, 0), (3, 0), (12, 7.5), (12, 9.5)]),
-        (3, [(3, 9), (5, 5), (9, 3), (12, 3), (12, 9), (3, 9)]),
-        (4, [(0, 9), (12, 9), (12, 11), (1.5, 11)]),
-        (2, [(3, 11), (12, 11), (12, 22), (8, 23.5), (4, 18), (3, 13)]),
-        (3, [(3, 11), (4.5, 11), (5.5, 19), (4, 18.5)]),
-        (EYE, [(4.5, 12.5), (11, 14), (11, 16.6), (4.5, 15)]),
-        (0, _rect(7, 18, 12, 19)), (0, _rect(8, 20, 12, 21)),
-        (3, [(6.5, 21.5), (12, 21.5), (12, 24), (10, 24)]),
-    ]),
-    ("calavera", True, [   # cráneo facetado con mandíbula de rejilla
-        (3, [(2, 10), (3, 4), (7, 1), (12, 0), (12, 16), (4, 16), (2, 13)]),
-        (4, [(3, 4), (7, 1), (12, 0), (12, 2), (7.5, 3), (4, 6.5)]),
-        (0, [(3, 8.5), (10.5, 8), (10.5, 13), (5, 14), (3, 12)]),
-        (EYE, _rect(5.5, 9.5, 9.5, 12.5)),
-        (0, [(10, 16), (12, 12.5), (12, 16)]),
-        (2, [(4, 16), (12, 16), (12, 24), (7, 24), (5, 21)]),
-        (0, _rect(6.5, 17, 7.5, 22)), (0, _rect(9, 17, 10, 23)),
-        (4, _rect(1, 8, 2, 12)),
-    ]),
-    ("androide", True, [   # casco hexagonal con visor de barrido
-        (3, [(2, 6), (6, 1), (12, 1), (12, 23), (6, 23), (2, 18)]),
-        (4, [(6, 1), (12, 1), (12, 3), (7, 3), (3.5, 7), (2, 6)]),
-        (0, [(1, 9), (12, 9), (12, 14), (2, 14)]),
-        (EYE, _rect(2, 11, 12, 12.2)),
-        (2, [(3, 14), (12, 14), (12, 22), (6.5, 22), (3, 18)]),
-        (0, _rect(8, 17, 12, 18)), (0, _rect(8, 19.5, 12, 20.5)),
-        (4, _rect(0, 10, 2, 15)),
-    ]),
-    ("oni", True, [   # demonio mecánico: cuernos, ceño en V, colmillos
-        (4, [(1, 0), (3, 0.5), (6.5, 7), (4.5, 8)]),
-        (3, [(2, 8), (5, 5), (12, 4), (12, 22), (7, 23.5), (3, 19), (2, 13)]),
-        (4, [(3, 8.5), (11.5, 11), (11.5, 12.6), (3, 10.2)]),
-        (EYE, [(4, 12), (10.5, 13.5), (10.5, 16), (4, 14.5)]),
-        (2, _rect(2, 14, 4.5, 18)),
-        (0, [(4.5, 17), (12, 17), (12, 22), (6.5, 22)]),
-        (4, [(6, 17), (8.5, 17), (7.2, 21)]),
-    ]),
-    ("netrunner", True, [   # capucha, gafas octogonales y respirador
-        (2, [(2, 7), (5, 2), (12, 1), (12, 23.5), (5, 22.5), (2, 16)]),
-        (3, _rect(1, 8, 12, 14)),
-        (0, [(3, 9), (8, 9), (9, 10), (9, 12), (8, 13), (3, 13), (2, 12), (2, 10)]),
-        (EYE, _rect(3.5, 9.8, 8, 12.2)),
-        (3, [(5, 15), (12, 15), (12, 23.5), (8, 23.5), (5, 19.5)]),
-        (4, [(2.5, 17), (5.5, 16), (6.5, 21.5), (3.5, 22.5)]),
-        (0, _rect(9, 18, 12, 19)), (0, _rect(9, 20.5, 12, 21.5)),
-    ]),
-    ("cíclope", False, [   # dron de una óptica, asimétrico
-        (3, [(3, 3), (21, 3), (22.5, 6), (22.5, 20), (19.5, 23), (5, 23), (1.5, 20), (1.5, 6)]),
-        (4, _rect(3, 3, 21, 5)),
-        (4, _rect(17, 0, 18.2, 3)),
-        (2, _rect(1.5, 7, 9, 20)),
-        (0, _rect(1.5, 10.5, 9, 11.5)), (0, _rect(1.5, 14.5, 9, 15.5)),
-        (0, _ring(15, 12, 5.5)),
-        (4, _ring(15, 12, 3.8)),
-        (0, _ring(15, 12, 2.9)),
-        (EYE, _ring(15, 12, 2)),
-        (0, _rect(11, 19.5, 20, 20.5)),
-    ]),
-)
+def _skull(u, v):
+    for sx in (-1, 1):
+        if _in(u, v, sx * 0.36, 0.02, 0.21, 0.2):
+            return EYE if _in(u, v, sx * 0.36, 0.05, 0.08, 0.09) else 0
+    if 0.22 < v < 0.4 and abs(u) < 0.03 + (v - 0.22) * 0.5:
+        return 0   # nariz
+    s = _lit(u, v, 0, -0.18, 0.8, 0.72)
+    if s is None and abs(u) < 0.42 and 0.3 < v < 0.9:
+        s = 0.7 - 0.3 * abs(u)
+    if s is not None and 0.52 < v < 0.8 and abs(u) < 0.4:
+        s = 0.9 if int((u + 1) * 9) % 2 else 0.02   # dientes
+    return s
 
 
-def _inside(px, py, pts):
-    hit = False
-    for (x0, y0), (x1, y1) in zip(pts, pts[1:] + pts[:1]):
-        if (y0 > py) != (y1 > py) and px < x0 + (py - y0) * (x1 - x0) / (y1 - y0):
-            hit = not hit
-    return hit
+def _oni(u, v):
+    for sx in (-1, 1):   # cuernos
+        t = (-v - 0.45) / 0.55
+        if 0 <= t <= 1 and abs(u * sx - (0.55 + 0.3 * t)) < 0.14 * (1 - t) + 0.03:
+            return 0.95 - 0.5 * t
+    for sx in (-1, 1):
+        if _in(u, v, sx * 0.32, 0.0, 0.16, 0.08):
+            return EYE
+        if -0.24 < v < -0.06 and 0.1 < u * sx < 0.56 and v > -0.3 + (u * sx - 0.1) * 0.4:
+            return 0.02   # cejas en V
+    if 0.42 < v < 0.74 and abs(u) < 0.46:
+        return 1.0 if abs(abs(u) - 0.3) < 0.07 and v < 0.68 else 0.03   # boca y colmillos
+    return _lit(u, v, 0, 0.05, 0.85, 0.85)
 
 
+def _visor(u, v):
+    if -0.16 < v < 0.08 and abs(u) < 0.8:
+        return EYE if abs(v + 0.04) < 0.06 else 0.04
+    if 0.35 < v < 0.75 and abs(u) < 0.3:
+        return 0.06 if int((u + 1) * 12) % 2 else 0.6   # rejilla
+    return _lit(u, v, 0, 0.0, 0.82, 0.9)
+
+
+def _mask(u, v):
+    for sx in (-1, 1):   # lentes
+        if _in(u, v, sx * 0.36, -0.08, 0.2, 0.2):
+            return EYE if not _in(u, v, sx * 0.36, -0.08, 0.1, 0.1) else 0.04
+    if _in(u, v, 0, 0.55, 0.3, 0.28):
+        return 0.08 if int((v + 1) * 14) % 2 else 0.8   # filtro
+    return _lit(u, v, 0, -0.1, 0.8, 0.82)
+
+
+def _fox(u, v):
+    for sx in (-1, 1):   # orejas
+        t = (-v - 0.3) / 0.7
+        if 0 <= t <= 1 and abs(u * sx - 0.55) < 0.28 * (1 - t):
+            return 0.2 if abs(u * sx - 0.55) < 0.1 * (1 - t) else 0.9 - 0.3 * t
+    if v < -0.35 or v > 0.95 or abs(u) > 0.8 - max(0, v) * 0.75:
+        return None
+    for sx in (-1, 1):   # ojos rasgados
+        if abs(v - (abs(u) - 0.3) * 0.5) < 0.055 and 0.14 < u * sx < 0.52:
+            return EYE
+    if v > 0.6 and abs(u) < 0.06:
+        return 0.04
+    return max(0.12, min(1, 0.95 - 0.5 * (u + 0.2) ** 2 - 0.45 * max(0, v)))
+
+
+def _cyclops(u, v):
+    if _in(u, v, 0.25, -0.05, 0.3, 0.3):   # la óptica
+        if _in(u, v, 0.25, -0.05, 0.12, 0.12):
+            return EYE
+        return 0.9 if _in(u, v, 0.25, -0.05, 0.2, 0.2) else 0.04
+    s = _lit(u, v, 0, 0, 0.82, 0.92)
+    if s is not None and u < -0.05:
+        s = s * 0.55 + (0.3 if int((v + 1) * 7) % 2 else 0)   # placas de metal
+    if s is not None and 0.5 < v < 0.62 and u > -0.05:
+        s = 0.04
+    return s
+
+
+FACES = (("calavera", _skull), ("oni", _oni), ("visor", _visor), ("respirador", _mask),
+         ("kitsune", _fox), ("cíclope", _cyclops))
 FACE_SIZE = {6: (24, 24), 4: (20, 16), 3: (12, 12)}   # filas -> píxeles (ancho, alto)
 _face_px = {}
 
 
-def face_pixels(design, rows):
-    """Píxeles (tonos) de un rostro a un tamaño; se rasterizan una sola vez."""
-    key = (design[0], rows)
+def face_pixels(fn, rows):
+    """Píxeles de un rostro a un tamaño; se calculan una sola vez."""
+    key = (fn, rows)
     if key not in _face_px:
-        _, mirror, shapes = design
         w, h = FACE_SIZE[rows]
-        sx, sy = 24 / w, 24 / h
-        px = [[None] * w for _ in range(h)]
-        for tone, pts in shapes:
-            polys = [pts] + ([[(24 - x, y) for x, y in pts]] if mirror else [])
-            for y in range(h):
-                for x in range(w):
-                    if any(_inside((x + 0.5) * sx, (y + 0.5) * sy, p) for p in polys):
-                        px[y][x] = tone
-        _face_px[key] = px
+        _face_px[key] = [[fn(((x + 0.5) / w * 2 - 1) * 1.05, ((y + 0.5) / h * 2 - 1) * 1.05)
+                          for x in range(w)] for y in range(h)]
     return _face_px[key]
 
 
 def dither(px, palette, eyes, scan=None, crack=False):
-    """Pasa los tonos a celdas de braille [(carácter, estilo)].
+    """Pasa los píxeles a celdas de braille [(carácter, estilo)].
 
-    palette: (sombra, color, brillo); eyes: estilo de los ojos o None si están apagados;
-    scan: columna que ilumina un visor; crack: rostro partido."""
+    palette: (sombra, medio, brillo) según la luz media de la celda; eyes: estilo de los
+    ojos o None si están apagados; scan: columna que ilumina un visor; crack: rostro roto."""
     h, w = len(px), len(px[0])
     out = []
     for cy in range(h // 4):
         row = []
         for cx in range(w // 2):
-            bits, votes = 0, Counter()
+            bits, light, n, eye = 0, 0.0, 0, False
             for dx in range(2):
                 for dy in range(4):
                     x, y = 2 * cx + dx, 4 * cy + dy
-                    tone = px[y][x]
-                    if tone is None or (crack and x == w // 2 + (y - h // 2) // 3):
+                    val = px[y][x]
+                    if crack and abs(x - (w // 2 + (y - h // 2) // 3)) < 1:
                         continue
-                    if tone == EYE:
-                        if eyes is None:
+                    if val == EYE:
+                        if eyes is not None and (scan is None or abs(x - scan) <= 2):
+                            bits |= DOTS[dx][dy]
+                            eye = True
                             continue
-                        if scan is not None and abs(x - scan) > 2:
-                            tone = 1
-                    on = tone in (3, 4, EYE) or (tone == 2 and (x + y) % 2 == 0) or (tone == 1 and x % 2 == 0 and y % 2 == 0)
-                    if on:
+                        val = 0.25 if eyes is not None else 0.0
+                    val = val or 0.0
+                    light += val
+                    n += 1
+                    if val > (BAYER[y % 4][x % 4] + 0.5) / 16:
                         bits |= DOTS[dx][dy]
-                        votes[tone] += 1
-            if not bits:
-                row.append((" ", ""))
-                continue
-            tone = max(votes, key=lambda t: (votes[t], t == EYE, t))
-            style = eyes if tone == EYE else palette[2] if tone == 4 else palette[1] if tone == 3 else palette[0]
-            row.append((chr(0x2800 + bits), style))
+            m = light / n if n else 0
+            style = eyes if eye else palette[0] if m < 0.4 else palette[1] if m < 0.78 else palette[2]
+            row.append((chr(0x2800 + bits) if bits else " ", style))
         out.append(row)
     return out
 
@@ -1425,17 +1426,17 @@ def eye_color(color):
 
 def agent_face(v, phase, i, now, rows):
     """Rostro tramado de un subagente, en su color; la expresión dice cómo va."""
-    design = FACES[sum(map(ord, v["type"])) % len(FACES)]
-    px = face_pixels(design, rows)
+    _, fn = FACES[sum(map(ord, v["type"])) % len(FACES)]
+    px = face_pixels(fn, rows)
     color = v["color"]
     failed = bool(v["end"]) and v["status"] != "completed"
     scan = None
     if v["running"]:
-        palette = (blend(LINE, color, 0.6), color, HIGHLIGHT)
+        palette = (blend(LINE, color, 0.5), color, HIGHLIGHT)
         k = (1 - math.cos(2 * math.pi * (now + i * 0.7) / 1.6)) / 2
         glow = eye_color(color)
         eyes = None if (phase + i * 11) % 41 == 0 else f"bold {blend(glow, '#ffffff', 0.5 * k)}"
-        if design[0] == "androide":   # el visor barre de lado a lado
+        if fn is _visor:   # el visor barre de lado a lado
             w = len(px[0])
             at = (phase + i * 3) % (2 * w - 2)
             scan = at if at < w else 2 * w - 2 - at
@@ -1455,7 +1456,7 @@ def agent_face(v, phase, i, now, rows):
 
 
 def lead_face(state, now):
-    px = face_pixels(FACES[3], 3)
+    px = face_pixels(_oni, 3)
     if state == "ended":
         return dither(px, (LINE, LINE, blend(LINE, FG, 0.3)), None)
     k = (1 - math.cos(2 * math.pi * now / 1.6)) / 2
@@ -1572,7 +1573,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False):
             rain(cv, 6, now, h)
         mid = w // 2
         size = 6 if h >= 15 else 4
-        put_cells(cv, mid - FACE_SIZE[size][0] // 4, 7, dither(face_pixels(FACES[2], size),
+        put_cells(cv, mid - FACE_SIZE[size][0] // 4, 7, dither(face_pixels(_visor, size),
                                                               (LINE, LINE, blend(LINE, FG, 0.35)), None))
         msg = "sin subagentes · sus rostros aparecen aquí a medida que el lead los invoca"
         msg = trunc(msg, w - 2)
