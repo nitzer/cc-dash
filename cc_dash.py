@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.41.2"
+__version__ = "0.41.3"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1691,12 +1691,8 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.put(ltx, 3, trunc(f"▶ {name}{more}: {lab}", iw), TOOL)
     else:
         cv.put(ltx, 3, trunc(s.title or "—", iw), DIM)
-    level = f"{lg['rounds']} ronda{'s' if lg['rounds'] != 1 else ''} · nivel {lg['lvl']}, sube en {10 - lg['xp']}"
-    level += f" · {EVO[lg['tier']]}" if lg["tier"] else f" · evoluciona en el nivel {(lg['lvl'] // 10 + 1) * 10}"
     if stat_n >= 2:
-        cv.put(ltx, 4, trunc(level, iw), DIM)
-    if stat_n >= 3:
-        cv.put(ltx, 5, trunc(f"HP = contexto libre: {lg['hp']}%" + (f" de {ktok(s.window())}" if s.ctx else ""), iw), DIM)
+        cv.put(ltx, 4, trunc(f"HP = contexto libre: {lg['hp']}%" + (f" de {ktok(s.window())}" if s.ctx else ""), iw), DIM)
 
     # ── una fila por subagente ──
     top = lead_h

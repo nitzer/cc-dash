@@ -139,8 +139,8 @@ la escalera de la derecha dice qué niveles abarca cada una y qué gana el
 rostro. Abajo indica qué tipos de subagente de la sesión llevan ese rostro.
 Si hay un subagente seleccionado, la ventana abre en su rostro y su evolución.
 
-El número exacto de rondas aparece junto al agente (`23 rondas`), en la fila
-del lead (`23 rondas · nivel 3, sube en 7`) y en el panel de actividad. Los
+El número exacto de rondas aparece junto al agente (`23 rondas`) y en el
+panel de actividad. Cuándo evoluciona cada rostro es una sorpresa. Los
 demás diseños muestran HP, LV y XP en la cabecera del lead. Si no caben las
 tres barras, se resumen en una o dos líneas.
 
