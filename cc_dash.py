@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.35.0"
+__version__ = "0.35.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -1546,10 +1546,14 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     # ── fila del lead ──
     lst = WAIT if state == "waiting" else LEAD if state != "ended" else LINE
     cv.box(0, 0, w, 5, lst)
-    put_cells(cv, 2, 1, lead_face(state, now))
-    tx = 10
-    with_log = w >= 90
-    iw = (w - tx - 2) // 2 if with_log else w - tx - 2
+    # todas las filas comparten columnas: hueco fijo para la cara, luego el texto y luego el log
+    slot = 12
+    tx = 2 + slot + 2
+    col_w = max(16, min(34, (w - tx - 2) // 2))
+    log_x = tx + col_w + 1
+    put_cells(cv, 2 + (slot - 6) // 2, 1, lead_face(state, now))
+    with_log = w - 1 - log_x >= 20
+    iw = col_w if with_log else w - tx - 2
     spin = SPIN[phase % len(SPIN)] if state == "busy" else "◆" if state == "waiting" else "■"
     right = f"{spin} {STATES[state][1]}"
     who = f"{short_model(s.model)} · lead · {store.label(s)}" + (f" · effort {s.effort}" if s.effort else "")
@@ -1577,8 +1581,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
     else:
         cv.put(tx, 3, trunc(s.title or "—", iw), DIM)
     if with_log:
-        lx = tx + iw + 2
-        mini_log(cv, lx, 1, w - lx - 1, 3, [e for e in recent.get("lead", []) if e[3] != "Agent"], LEAD)
+        mini_log(cv, log_x, 1, w - log_x - 1, 3, [e for e in recent.get("lead", []) if e[3] != "Agent"], LEAD)
 
     # ── una fila por subagente ──
     top = 5
@@ -1632,11 +1635,11 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         edge = "bold #ffffff" if chosen else ERR if failed else v["color"] if live else LINE
         cv.box(x, y, cw, card_h, edge, heavy=chosen)
         show_face = cw >= 64
-        fw = FACE_SIZE[face_rows][0] // 2 if show_face else 0
-        if show_face:
-            put_cells(cv, x + 2, y + 1, agent_face(v, phase, n, now, face_rows))
-        ix = x + 2 + (fw + 2 if show_face else 0)
-        iw = max(16, min(30, (cw - (ix - x) - 2) // 2))
+        fw = FACE_SIZE[face_rows][0] // 2
+        if show_face:   # centrada en un hueco del mismo ancho para todas, sea cual sea su tamaño
+            put_cells(cv, x + 2 + (slot - fw) // 2, y + 1, agent_face(v, phase, n, now, face_rows))
+        ix = x + (tx if show_face else 2)
+        iw = col_w if per_row == 1 else max(16, min(30, (cw - (ix - x) - 2) // 2))
         icon, ist = agent_icon(v, phase, n)
         cv.put(ix, y + 1, icon, ist)
         cv.put(ix + 2, y + 1, trunc(v["type"], iw - 2), f"bold {v['color']}" if live else "bold" if chosen else FG)
@@ -1652,6 +1655,8 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.put(ix, y + 3 + dl, trunc(stat, iw), v["color"] if live else DIM)
         # a la derecha, su log, sobre fondo propio
         lx = ix + iw + 1
+        if per_row == 1 and show_face:
+            lx = log_x   # el log de todos empieza en la misma columna que el del lead
         if x + cw - 1 - lx >= 20:
             mine = recent.get(v["aid"], []) + recent.get(v["id"], [])
             mine.sort(key=lambda e: e[0])
