@@ -58,10 +58,10 @@ Las principales:
 
 `d` alterna el panel de agentes entre cinco diseños: `lista`, `tabla`,
 `tarjetas`, `tiempo` y `diagrama`. En `diagrama` cada subagente es una tarjeta
-con un rostro cyberpunk que cuelga del lead: calavera, oni, visor, respirador,
-kitsune o cíclope, según el tipo de subagente. Los rostros están dibujados con
-puntos de braille tramados, en el color del subagente con brillos cian, y los
-ojos encendidos en un color que contrasta. Las tarjetas aparecen a medida que
+con un rostro cyberpunk que cuelga del lead: ronin, calavera, androide, oni,
+netrunner o cíclope, según el tipo de subagente. Son máscaras angulares hechas
+de placas, con puntos de braille en relleno plano o tramado, en el color del
+subagente con brillos cian, y los ojos encendidos en un color que contrasta. Las tarjetas aparecen a medida que
 el lead crea subagentes, sin casillas vacías: en una fila con rostros grandes
 o, si no caben, en dos filas con rostros más pequeños. Mientras trabaja, los
 ojos laten (el visor barre de lado a lado) y la imagen se corrompe a ratos
