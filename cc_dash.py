@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.41.4"
+__version__ = "0.42.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -79,8 +79,37 @@ THEMES = {
     "ambar": dict(LEAD="#ffb000", SWARM="#ffd166", TOOL="#ffe9a8", ADVISOR="#ff8c42", ERR="#ff4d2e",
                   WAIT="#ffffff", DIM="#9a7526", LINE="#5c4412", FG="#ffdca6", CARD_BG="#261c06",
                   DONE="#b3832a"),
+    # Catppuccin (catppuccin.com): sus cuatro sabores, de más oscuro a claro (latte es para fondo claro)
+    "catppuccin-mocha": dict(LEAD="#fab387", SWARM="#89b4fa", TOOL="#a6e3a1", ADVISOR="#cba6f7", ERR="#f38ba8",
+                             WAIT="#f9e2af", DIM="#6c7086", LINE="#45475a", FG="#cdd6f4", CARD_BG="#313244",
+                             DONE="#9399b2"),
+    "catppuccin-macchiato": dict(LEAD="#f5a97f", SWARM="#8aadf4", TOOL="#a6da95", ADVISOR="#c6a0f6",
+                                 ERR="#ed8796", WAIT="#eed49f", DIM="#6e738d", LINE="#494d64", FG="#cad3f5",
+                                 CARD_BG="#363a4f", DONE="#939ab7"),
+    "catppuccin-frappe": dict(LEAD="#ef9f76", SWARM="#8caaee", TOOL="#a6d189", ADVISOR="#ca9ee6", ERR="#e78284",
+                              WAIT="#e5c890", DIM="#737994", LINE="#51576d", FG="#c6d0f5", CARD_BG="#414559",
+                              DONE="#949cbb"),
+    "catppuccin-latte": dict(LEAD="#fe640b", SWARM="#1e66f5", TOOL="#40a02b", ADVISOR="#8839ef", ERR="#d20f39",
+                             WAIT="#df8e1d", DIM="#8c8fa1", LINE="#acb0be", FG="#4c4f69", CARD_BG="#e6e9ef",
+                             DONE="#7c7f93"),
+    # los 16 colores de tu terminal: sigue la paleta que tengas configurada en el shell.
+    # LINE es color(8), el mismo gris que bright_black, escrito distinto para que no se repita.
+    "terminal": dict(LEAD="magenta", SWARM="blue", TOOL="green", ADVISOR="cyan", ERR="red", WAIT="yellow",
+                     DIM="bright_black", LINE="color(8)", FG="default", CARD_BG="default", DONE="bright_blue",
+                     HIGHLIGHT="bright_white", BLOOD="bright_red"),
 }
-# Marco tipo HUD para los temas no clásicos: solo esquinas, sin laterales.
+# colores de los subagentes por tema; los que no están usan los de neón
+THEME_AGENTS = {
+    "catppuccin-mocha": ("#eba0ac", "#89dceb", "#94e2d5", "#f9e2af", "#cba6f7", "#fab387", "#f5c2e7", "#b4befe"),
+    "catppuccin-macchiato": ("#ee99a0", "#91d7e3", "#8bd5ca", "#eed49f", "#c6a0f6", "#f5a97f", "#f5bde6",
+                             "#b7bdf8"),
+    "catppuccin-frappe": ("#ea999c", "#99d1db", "#81c8be", "#e5c890", "#ca9ee6", "#ef9f76", "#f4b8e4", "#babbf1"),
+    "catppuccin-latte": ("#e64553", "#04a5e5", "#179299", "#df8e1d", "#8839ef", "#fe640b", "#ea76cb", "#7287fd"),
+    "terminal": ("bright_red", "bright_cyan", "bright_green", "bright_yellow", "bright_magenta", "bright_blue",
+                 "cyan", "magenta"),
+}
+HUD_THEMES = {"neon", "matrix", "ambar"}
+# Marco tipo HUD para los temas de HUD_THEMES: solo esquinas, sin laterales.
 HUD_BOX = box.Box("⌜─ ⌝\n    \n    \n    \n    \n    \n    \n⌞─ ⌟\n")
 HUD_HEAVY = box.Box("▛▀▀▜\n▌  ▐\n▌  ▐\n▌  ▐\n▌  ▐\n▌  ▐\n▌  ▐\n▙▄▄▟\n")
 THEME = dict(THEMES["clasico"])   # papel -> color del tema activo
@@ -90,12 +119,14 @@ PANEL_BOX, CARD_BOX = box.SQUARE, box.HEAVY
 
 def apply_theme(name):
     """Cambia los colores y el marco de todo el dashboard."""
-    global HUD, PANEL_BOX, CARD_BOX
+    global HUD, PANEL_BOX, CARD_BOX, AGENT_COLORS
     colors = THEMES.get(name, THEMES["clasico"])
+    globals().update(HIGHLIGHT="#d1f7ff", BLOOD="#ff2a3c")   # los rostros; el tema puede cambiarlos
     globals().update(colors)
     THEME.clear()
     THEME.update(colors)
-    HUD = name in THEMES and name != "clasico"
+    AGENT_COLORS = THEME_AGENTS.get(name, NEON_AGENTS)
+    HUD = name in HUD_THEMES
     PANEL_BOX, CARD_BOX = (HUD_BOX, HUD_HEAVY) if HUD else (box.SQUARE, box.HEAVY)
 
 
@@ -114,7 +145,8 @@ STATES = {"waiting": ("◆", "espera tu respuesta", "WAIT"), "busy": ("●", "tr
 def state_color(state):
     return THEME[STATES[state][2]]
 # un color por subagente, el mismo en su tarjeta, su fila y el gráfico de actividad
-AGENT_COLORS = ("#ff2a6d", "#05d9e8", "#39ff14", "#ffd319", "#b967ff", "#01ffc3", "#ff71ce", "#7aa2ff")
+NEON_AGENTS = ("#ff2a6d", "#05d9e8", "#39ff14", "#ffd319", "#b967ff", "#01ffc3", "#ff71ce", "#7aa2ff")
+AGENT_COLORS = NEON_AGENTS
 MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
 # Umbrales del detector de atascos (solo se evalúa mientras la sesión trabaja)
 STUCK_ERRORS = 3     # resultados con error seguidos
@@ -329,7 +361,8 @@ def save_config(cfg):
         f"auto_update = {'true' if cfg['auto_update'] else 'false'}",
         "# layout: diseño del panel de agentes (lista, tabla, tarjetas, tiempo, diagrama); tecla d.",
         f"layout = {json.dumps(cfg['layout'])}",
-        "# theme: clasico, neon, matrix o ambar (tecla T). alerts: pitido y aviso de tmux (tecla m).",
+        "# theme: clasico, neon, matrix, ambar, catppuccin-mocha/-macchiato/-frappe/-latte o terminal"
+        " (los colores de tu shell); tecla T. alerts: pitido y aviso de tmux (tecla m).",
         f"theme = {json.dumps(cfg['theme'])}",
         f"alerts = {'true' if cfg['alerts'] else 'false'}",
         "# effects: arranque animado, glitch en los avisos y lluvia en reposo (tecla E).",
@@ -1187,7 +1220,11 @@ class Canvas:
 
 
 def blend(a, b, k):
-    """Color intermedio entre dos #rrggbb; k=0 da a, k=1 da b."""
+    """Color intermedio entre dos #rrggbb; k=0 da a, k=1 da b.
+
+    Con colores con nombre (tema terminal) no se puede mezclar: da el más cercano."""
+    if not (a.startswith("#") and b.startswith("#")):
+        return a if k < 0.5 else b
     ca, cb = (int(a[i:i + 2], 16) for i in (1, 3, 5)), (int(b[i:i + 2], 16) for i in (1, 3, 5))
     return "#" + "".join(f"{round(x + (y - x) * k):02x}" for x, y in zip(ca, cb))
 
@@ -1469,6 +1506,8 @@ def dither(px, palette, eyes, scan=None, crack=False):
 
 def eye_color(color):
     """Ojos que contrasten con el color del rostro: rojo, o cian si el rostro ya es rojizo."""
+    if not color.startswith("#"):
+        return "bright_cyan" if "red" in color else "bright_red"
     r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
     return "#00f0ff" if r > 200 and g < 140 else BLOOD
 
@@ -1499,7 +1538,7 @@ def agent_face(v, phase, i, now, rows, tier=0, fn=None):
     cells = dither(px, palette, eyes, scan, crack=failed)
     if v["running"] and v["tool"] and (phase + i * 5) % 7 < 2:   # señal corrupta mientras usa una herramienta
         g = (phase // 3 + i) % len(cells)
-        accent = "#ff2a6d" if color == "#05d9e8" else "#05d9e8"
+        accent = AGENT_COLORS[0] if color == AGENT_COLORS[1] else AGENT_COLORS[1]
         cells[g] = [(" ", "")] + [(ch, accent) for ch, _ in cells[g][:-1]]
     return cells
 

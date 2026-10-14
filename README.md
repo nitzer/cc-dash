@@ -179,8 +179,17 @@ cambiar de cuenta (`c`).
   La barra de ahora destella con cada herramienta nueva, y el rombo de la
   leyenda late más rápido cuanto más ritmo hay. La leyenda muestra cuántas
   herramientas aportó cada uno, más las herramientas y los tokens por minuto.
-- **Temas:** `T` cambia entre `clasico`, `neon`, `matrix` y `ambar`; los tres
-  últimos usan un marco tipo HUD (solo esquinas). También `cc-dash --theme neon`.
+- **Temas:** `T` los recorre; también `cc-dash --theme neon`.
+  - `clasico`, `neon`, `matrix` y `ambar`. Los tres últimos usan un marco
+    tipo HUD (solo esquinas).
+  - `catppuccin-mocha`, `catppuccin-macchiato`, `catppuccin-frappe` y
+    `catppuccin-latte`: la paleta [Catppuccin](https://catppuccin.com), con
+    los subagentes en sus colores de acento. `latte` es para terminales con
+    fondo claro.
+  - `terminal`: usa los 16 colores de tu terminal, así sigue el esquema que
+    tengas configurado en el shell (el que sea). Como esos colores no se
+    pueden mezclar, los fundidos y el "respirar" de los colores pasan de un
+    tono a otro en vez de transicionar suave.
 
 ## Detector de atascos y ritmo de consumo
 
@@ -372,7 +381,7 @@ El archivo es `~/.config/cc-dash/config.toml` y se puede editar a mano:
 include_default = true          # añade ~/.claude si no está listada
 auto_update = true              # se actualiza solo al arrancar
 layout = "lista"                # diseño del panel de agentes
-theme = "neon"                  # clasico, neon, matrix o ambar
+theme = "neon"                  # clasico, neon, matrix, ambar, catppuccin-*, terminal
 alerts = true                   # pitido y aviso de tmux
 effects = true                  # arranque, glitch y lluvia en reposo
 scan = ["/srv/dev/claude"]
