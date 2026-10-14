@@ -4,7 +4,8 @@ Dashboard en vivo, en la terminal, de las sesiones de Claude Code: qué sesiones
 están abiertas, qué modelo lleva cada una, herramientas en curso, subagentes,
 tokens y un log cronológico. Soporta varias cuentas en la misma máquina.
 
-Solo lee archivos locales de Claude Code; no modifica ni envía nada.
+Solo lee archivos locales de Claude Code y no envía nada. Lo único que escribe
+fuera de su configuración es el hook opcional de `cc-dash hook install`.
 
 ## Instalar
 
@@ -52,6 +53,7 @@ Las principales:
 - `←`/`→`: selecciona un subagente · `r`/`p`: su respuesta o su prompt
 - `s`: cursor en el session log, con el detalle de cada entrada a la derecha
 - `o`: tareas · `n`: novedades · `v`: conversación de la sesión
+- `D`: abre el último `.md` que escribió la sesión (un spec, un plan…)
 - `d`: diseño · `T`: tema · `,`: configuración · `q`: sale
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
@@ -170,6 +172,7 @@ cc-dash set toasts false       # sin toasts (igual que la tecla X)
 | `toast_seconds` | 8 | segundos que dura un toast |
 | `toast_max` | 4 | toasts visibles a la vez |
 | `toasts`, `alerts`, `effects`, `auto_update` | true | interruptores |
+| `viewer`, `viewer_popup`, `spec_match` | — | visor de documentos (ver más abajo) |
 
 Dentro del dashboard, **`,`** abre una ventana flotante con todos estos
 ajustes más el tema y el diseño: `j`/`k` mueve, `h`/`l` cambia el valor,
@@ -179,6 +182,53 @@ se aplica y se guarda al momento.
 Los valores viven en `~/.config/cc-dash/config.toml`. Un dashboard abierto
 los relee en un par de segundos, sin reiniciarlo. `X` apaga o enciende los
 toasts de forma permanente; las novedades siguen llegando al registro (`n`).
+
+## Ver el documento que hay que aprobar
+
+Cuando una sesión escribe un spec o un plan y se detiene a preguntarte, hay
+dos formas de leerlo sin salir de la terminal:
+
+- **`D`** en el dashboard abre el último `.md` que escribió o editó la sesión
+  enfocada. Si la sesión te espera, el panel del lead lo recuerda
+  (`◆ necesita una respuesta · D abre login-design.md`).
+- **Un hook de Claude Code** lo abre solo, encima del panel donde corre la
+  sesión, en el momento en que pregunta:
+
+  ```sh
+  cc-dash hook install     # lo añade al settings.json de cada cuenta
+  cc-dash hook status
+  cc-dash hook remove
+  cc-dash -a trabajo hook install   # solo una cuenta
+  ```
+
+  El hook se dispara en dos momentos y mira solo los `.md` escritos desde tu
+  último mensaje:
+  - al hacerte una pregunta con opciones (`AskUserQuestion`): abre el último;
+  - al terminar el turno: abre el último cuya ruta cumpla `spec_match`
+    (por defecto `spec|plan|design|diseño|prd|rfc|propuesta|proposal`), para
+    no saltar con cualquier README.
+
+  No repite un archivo que ya mostró salvo que haya cambiado. Si en ese
+  momento no estás mirando el panel de la sesión, o no hay tmux, no abre nada
+  y deja la ruta en un mensaje de Claude Code. Las sesiones ya abiertas toman
+  el hook al reiniciarse.
+
+El programa que abre el documento es configurable:
+
+```sh
+cc-dash set viewer "glow -p"              # la ruta se añade al final
+cc-dash set viewer "nvim -R {file}"       # o donde pongas {file}
+cc-dash set viewer ""                     # automático: glow, bat o less
+cc-dash set viewer_popup false            # sin popup: para visores con ventana propia
+cc-dash set viewer "code {file}"          #   …como un editor gráfico
+cc-dash view docs/spec.md                 # prueba el visor con un archivo
+```
+
+Con `viewer_popup = true` (por defecto) se abre en un popup de tmux al 90 %
+de la pantalla, que se cierra al salir del visor; por eso conviene un visor
+que se quede abierto (`glow -p` y no `glow`). Fuera de tmux, `D` y
+`cc-dash view` le ceden la terminal al visor hasta que lo cierres. El visor
+también se elige en la ventana de configuración (`,`).
 
 ## Sesiones que esperan tu respuesta
 

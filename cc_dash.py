@@ -20,6 +20,8 @@ import math
 import os
 import random
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -45,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -258,7 +260,15 @@ LIMITS = {
     "toast_max": ("TOAST_MAX", 4, "toasts visibles a la vez"),
 }
 SWITCHES = {"toasts": "mostrar toasts (tecla X)", "alerts": "pitido y aviso de tmux (tecla m)",
-            "effects": "arranque, glitch y lluvia (tecla E)", "auto_update": "actualizarse al arrancar"}
+            "effects": "arranque, glitch y lluvia (tecla E)", "auto_update": "actualizarse al arrancar",
+            "viewer_popup": "abrir los documentos en un popup de tmux (false: lanzar el visor tal cual)"}
+# visores que se prueban, en orden, cuando `viewer` está vacío
+VIEWERS = ("glow -p", "bat --paging=always", "batcat --paging=always", "less -R", "more")
+SPEC_MATCH = "spec|plan|design|dise[ñn]o|prd|rfc|propuesta|proposal"
+TEXTS = {
+    "viewer": ("", "programa que abre los .md, p. ej. \"glow -p\" o \"nvim -R {file}\" (vacío = automático)"),
+    "spec_match": (SPEC_MATCH, "regex: rutas de .md que se abren solas al terminar un turno"),
+}
 
 
 def apply_limits(cfg):
@@ -269,6 +279,7 @@ def apply_limits(cfg):
 def load_config():
     cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista",
            "theme": "clasico", "alerts": True, "effects": True, "toasts": True, "disabled": [],
+           "viewer_popup": True, **{key: default for key, (default, _) in TEXTS.items()},
            **{key: default for key, (_, default, _) in LIMITS.items()}}
     try:
         with open(config_path(), "rb") as fh:
@@ -287,6 +298,14 @@ def load_config():
     cfg["alerts"] = bool(raw.get("alerts", True))
     cfg["effects"] = bool(raw.get("effects", True))
     cfg["toasts"] = bool(raw.get("toasts", True))
+    cfg["viewer_popup"] = bool(raw.get("viewer_popup", True))
+    for key in TEXTS:
+        if isinstance(raw.get(key), str):
+            cfg[key] = raw[key].strip()
+    try:
+        re.compile(cfg["spec_match"] or SPEC_MATCH)
+    except re.error:
+        cfg["spec_match"] = SPEC_MATCH
     for key in LIMITS:
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
@@ -314,6 +333,13 @@ def save_config(cfg):
         f"effects = {'true' if cfg['effects'] else 'false'}",
         "# toasts: novedades como recuadros en la esquina (tecla X); el registro (n) sigue igual.",
         f"toasts = {'true' if cfg['toasts'] else 'false'}",
+        "# viewer: programa que abre los .md de una sesión (tecla D y `cc-dash hook`); {file} es la ruta",
+        "# y, si no aparece, se añade al final. Vacío: el primero instalado de glow, bat, less.",
+        f"viewer = {json.dumps(cfg['viewer'], ensure_ascii=False)}",
+        "# viewer_popup: lo abre en un popup de tmux; false lanza la orden tal cual (visores con ventana propia).",
+        f"viewer_popup = {'true' if cfg['viewer_popup'] else 'false'}",
+        "# spec_match: regex sobre la ruta; los .md que la cumplen se abren solos cuando el turno termina.",
+        f"spec_match = {json.dumps(cfg['spec_match'], ensure_ascii=False)}",
         "# Umbrales. Se pueden cambiar aquí o con `cc-dash set CLAVE VALOR`; el dashboard los relee solo.",
         *[f"{key} = {cfg[key]}".ljust(22) + f"# {what}" for key, (_, _, what) in LIMITS.items()],
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
@@ -463,6 +489,7 @@ class Session:
         self.tool_counts = Counter()
         self.skills = Counter()
         self.edits = Counter()  # ruta -> ediciones (Edit/Write/NotebookEdit)
+        self.docs = []          # .md escritos o editados, el más reciente al final
         self.reads = set()
         self.mcp = Counter()
         self.hooks = Counter()
@@ -674,6 +701,9 @@ class Store:
         path = inp.get("file_path") or inp.get("notebook_path") if isinstance(inp, dict) else None
         if path and name in ("Edit", "Write", "NotebookEdit"):
             s.edits[path] += 1
+            if is_doc(path):
+                path = os.path.join(s.cwd or "", path)
+                s.docs = [p for p in s.docs if p != path] + [path]
         elif path and name == "Read":
             s.reads.add(path)
 
@@ -1383,7 +1413,8 @@ def lead_block(cv, store, s, w, now, phase, compact=False):
     cv.put(max(0, w - len(right)), 0, right, f"bold {color}")
     why = store.stuck(s, now)
     if state == "waiting":
-        cv.put(0, 1, trunc(f"◆ necesita {store.waiting_for(s)}", w), f"bold {breath(WAIT, now)}")
+        doc = f" · D abre {os.path.basename(s.docs[-1])}" if s.docs else ""
+        cv.put(0, 1, trunc(f"◆ necesita {store.waiting_for(s)}{doc}", w), f"bold {breath(WAIT, now)}")
     elif why:
         cv.put(0, 1, trunc("⚠ posible atasco: " + " · ".join(why), w), f"bold {breath(ERR, now)}")
     elif s.pending and state != "ended":
@@ -2287,6 +2318,7 @@ KEYS = [
         ("Enter", "salta al panel de tmux de la sesión"),
         ("c", "filtra por cuenta, si hay más de una"),
         ("v", "conversación de la sesión"),
+        ("D", "abre el último .md que escribió (spec, plan…)"),
     ]),
     ("Subagentes", [
         ("← →  ·  h l", "selecciona un subagente"),
@@ -2385,6 +2417,8 @@ SETTINGS = [
     ("alerts", "Pitido y aviso de tmux", "bool", None, True, "suena y avisa en tmux con las novedades importantes"),
     ("effects", "Efectos visuales", "bool", None, True, "arranque animado, glitch en los avisos y lluvia en reposo"),
     ("auto_update", "Actualizarse al arrancar", "bool", None, True, "busca cambios en el repo al abrir el dashboard"),
+    ("viewer", "Visor de documentos", "viewer", None, "", "programa que abre los .md (tecla D); otro: cc-dash set viewer \"ORDEN\""),
+    ("viewer_popup", "Visor en popup de tmux", "bool", None, True, "no: lanza el visor tal cual, para programas con ventana propia"),
     None,
     ("stuck_errors", "Errores seguidos", "int", 1, 3, "atasco: resultados con error seguidos (0 = no mirar)"),
     ("stuck_repeat", "Llamadas repetidas", "int", 1, 4, "atasco: veces seguidas la misma llamada (0 = no mirar)"),
@@ -2439,6 +2473,8 @@ def settings_panel(cfg, store, view, width, max_rows):
             shown = "activa" if value else "deshabilitada"
         elif kind == "bool":
             shown = "sí" if value else "no"
+        elif kind == "viewer":
+            shown = value or f"automático ({viewer_choices(cfg)[1] if len(viewer_choices(cfg)) > 1 else 'ninguno instalado'})"
         elif kind == "int" and value == 0 and key.startswith("stuck"):
             shown = "apagado"
         elif kind == "int" and key not in ("stuck_errors", "stuck_repeat", "toast_max"):
@@ -2468,6 +2504,12 @@ def settings_panel(cfg, store, view, width, max_rows):
                  else "se guarda al cambiar", subtitle_align="right")
 
 
+def viewer_choices(cfg):
+    """Automático, los visores instalados y, si es otro, el que haya en la configuración."""
+    found = [v for v in (*VIEWERS, "nvim -R", "vim -R") if shutil.which(v.split()[0])]
+    return ["", *found, *([cfg["viewer"]] if cfg["viewer"] and cfg["viewer"] not in found else [])]
+
+
 def change_setting(cfg, item, step):
     """Mueve un ajuste un paso (step=±1), o lo devuelve a su valor por defecto (step=0)."""
     key, _, kind, extra, default, _ = item
@@ -2481,6 +2523,9 @@ def change_setting(cfg, item, step):
         cfg[key] = default
     elif kind == "bool":
         cfg[key] = not cfg[key]
+    elif kind == "viewer":
+        options = viewer_choices(cfg)
+        cfg[key] = options[(options.index(cfg[key]) + step) % len(options)]
     elif kind == "choice":
         cfg[key] = extra[(extra.index(cfg[key]) + step) % len(extra)]
     else:
@@ -2760,6 +2805,194 @@ def jump(store, s):
     return f"→ {store.label(s)}" if moved.returncode == 0 else f"tmux: {moved.stderr.strip()}"
 
 
+def is_doc(path):
+    return isinstance(path, str) and path.lower().endswith((".md", ".markdown", ".mdx"))
+
+
+def viewer_command(cfg, path):
+    """Orden de shell que abre `path`: la configurada o el primer visor instalado."""
+    cmd = cfg["viewer"] or next((v for v in VIEWERS if shutil.which(v.split()[0])), "")
+    if not cmd:
+        return ""
+    return cmd.replace("{file}", shlex.quote(path)) if "{file}" in cmd else f"{cmd} {shlex.quote(path)}"
+
+
+def tmux_out(*args):
+    try:
+        got = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return got.stdout.strip() if got.returncode == 0 else None
+
+
+def open_doc(cfg, path, pane=None, only_visible=False):
+    """Abre un documento con el visor configurado, sin esperar a que se cierre.
+
+    Devuelve "" si lo abrió; "tty" si el visor necesita una terminal y no hay tmux;
+    "hidden" si `only_visible` y nadie está mirando ese panel; o el motivo del fallo.
+    """
+    cmd = viewer_command(cfg, path)
+    if not cmd:
+        return 'no hay visor instalado: elige uno con `cc-dash set viewer "PROGRAMA"`'
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE,
+             "start_new_session": True}
+    argv = cmd
+    if cfg["viewer_popup"]:
+        pane = pane or os.environ.get("TMUX_PANE")
+        if not (os.environ.get("TMUX") and pane):
+            return "tty"
+        where = (tmux_out("display-message", "-p", "-t", pane,
+                          "#{session_id} #{session_attached} #{window_active}") or "").split()
+        if len(where) != 3:
+            return "tmux no encontró el panel de la sesión"
+        if only_visible and (where[1] == "0" or where[2] != "1"):
+            return "hidden"
+        # el popup sale en el cliente que usó esa sesión de tmux por última vez
+        clients = sorted((tmux_out("list-clients", "-t", where[0], "-F", "#{client_activity} #{client_name}")
+                          or "").splitlines())
+        if not clients:
+            return "hidden" if only_visible else "no hay ningún cliente de tmux en esa sesión"
+        argv = ["tmux", "display-popup", "-c", clients[-1].split(" ", 1)[1], "-t", pane, "-E",
+                "-w", "90%", "-h", "90%", "-T", f" {os.path.basename(path)} · {os.path.dirname(path).replace(HOME, '~')} ",
+                "-d", os.path.dirname(path) or ".", cmd]
+    try:
+        proc = subprocess.Popen(argv, shell=isinstance(argv, str), **quiet)
+        proc.wait(0.4)   # si sigue vivo, el visor está abierto
+    except subprocess.TimeoutExpired:
+        return ""
+    except OSError as exc:
+        return f"no se pudo abrir el visor: {exc}"
+    if proc.returncode == 0:
+        return ""
+    return "el visor falló: " + (trunc(proc.stderr.read().decode(errors="replace"), 120) or f"código {proc.returncode}")
+
+
+def turn_docs(transcript, cwd):
+    """Los .md que la sesión escribió desde el último mensaje del usuario, el más reciente al final."""
+    docs = []
+    try:
+        with open(transcript, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - 8_000_000))
+            if fh.tell():
+                fh.readline()   # línea a medias
+            for raw in fh:
+                if b'"tool_use"' not in raw and b'"user"' not in raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if entry.get("isSidechain"):
+                    continue
+                content = (entry.get("message") or {}).get("content")
+                if entry.get("type") == "user":
+                    typed = isinstance(content, str) or any(
+                        isinstance(b, dict) and b.get("type") == "text" for b in content or [])
+                    if typed and not entry.get("isMeta"):
+                        docs = []
+                    continue
+                for b in content if isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("Write", "Edit", "MultiEdit"):
+                        path = (b.get("input") or {}).get("file_path")
+                        if is_doc(path):
+                            path = os.path.join(cwd or "", path)
+                            docs = [p for p in docs if p != path] + [path]
+    except OSError:
+        pass
+    return [p for p in docs if os.path.isfile(p)]
+
+
+def run_hook(cfg):
+    """`cc-dash hook`: Claude Code lo llama al preguntar o al terminar un turno; abre el documento a revisar."""
+    try:
+        event = json.load(sys.stdin)
+    except ValueError:
+        return
+    docs = turn_docs(event.get("transcript_path") or "", event.get("cwd") or "")
+    wanted = re.compile(cfg["spec_match"] or SPEC_MATCH, re.I)
+    specs = [p for p in docs if wanted.search(p)]
+    # al terminar el turno solo se abren las rutas que parecen un spec; ante una pregunta, cualquier .md
+    doc = (specs or (docs if event.get("hook_event_name") != "Stop" else []))[-1:]
+    if not doc:
+        return
+    doc = doc[0]
+    seen_path = os.path.join(data_dir(), "shown.json")
+    try:
+        with open(seen_path) as fh:
+            seen = json.load(fh)
+    except (OSError, ValueError):
+        seen = {}
+    stamp = os.path.getmtime(doc)
+    if seen.get(doc) == stamp:   # esa versión ya se mostró
+        return
+    why = open_doc(cfg, doc, only_visible=True)
+    if why:
+        note = f"cc-dash: documento a revisar: {doc}" + ("" if why in ("tty", "hidden") else f" ({why})")
+        print(json.dumps({"systemMessage": note}, ensure_ascii=False))
+    seen.pop(doc, None)
+    seen[doc] = stamp
+    try:
+        os.makedirs(data_dir(), exist_ok=True)
+        with open(seen_path, "w") as fh:
+            json.dump(dict(list(seen.items())[-100:]), fh)
+    except OSError:
+        pass
+
+
+def hook_command():
+    exe = os.path.abspath(sys.argv[0])
+    if os.path.basename(exe) != "cc-dash":
+        exe = shutil.which("cc-dash") or f"{sys.executable} {shlex.quote(os.path.abspath(__file__))}"
+    return f"{exe} hook"
+
+
+def is_ours(group):
+    return any(re.search(r"cc[-_]dash(\.py)?['\"]? hook$", h.get("command", "")) for h in group.get("hooks", []))
+
+
+def manage_hooks(accounts, action):
+    """Instala, quita o muestra el hook de cc-dash en el settings.json de cada cuenta."""
+    ours = {"type": "command", "command": hook_command(), "timeout": 10}
+    wanted = {"PreToolUse": {"matcher": "AskUserQuestion", "hooks": [ours]}, "Stop": {"hooks": [ours]}}
+    for a in accounts:
+        path = os.path.realpath(os.path.join(a.path, "settings.json"))
+        try:
+            with open(path) as fh:
+                settings = json.load(fh)
+        except FileNotFoundError:
+            settings = {}
+        except (OSError, ValueError) as exc:
+            print(f"{a.name}: no se pudo leer {path}: {exc}")
+            continue
+        hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
+        has = all(any(is_ours(g) for g in hooks.get(event, [])) for event in wanted)
+        if action == "status":
+            print(f"{a.name}: {'instalado' if has else 'sin instalar'} · {path}")
+            continue
+        for event, group in wanted.items():
+            kept = [g for g in hooks.get(event, []) if not is_ours(g)]
+            if action == "install":
+                kept.append(group)
+            if kept:
+                hooks[event] = kept
+            else:
+                hooks.pop(event, None)
+        if hooks:
+            settings["hooks"] = hooks
+        else:
+            settings.pop("hooks", None)
+        try:
+            with open(path + ".cc-dash.tmp", "w") as fh:
+                json.dump(settings, fh, indent=2, ensure_ascii=False)
+                fh.write("\n")
+            os.replace(path + ".cc-dash.tmp", path)
+        except OSError as exc:
+            print(f"{a.name}: no se pudo escribir {path}: {exc}")
+            continue
+        print(f"{a.name}: hook {'instalado' if action == 'install' else 'quitado'} · {path}")
+
+
 def shown_text(store, focus, ui, now):
     """Lo que el usuario tiene delante y tendría sentido copiar."""
     if ui["log"] is not None:
@@ -2841,7 +3074,7 @@ def reload_limits(cfg, ui, seen, now):
         fresh = load_config()
     except SystemExit:   # archivo a medio escribir o con errores: se mantiene lo que había
         return
-    for key in (*LIMITS, "toasts", "alerts", "effects", "disabled"):
+    for key in (*LIMITS, *TEXTS, "toasts", "alerts", "effects", "disabled", "viewer_popup"):
         cfg[key] = fresh[key]
     ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
     apply_limits(cfg)
@@ -2992,6 +3225,20 @@ def run(accounts, once, cfg):
                         copy_text(text)
                     ui["flash"] = (f"copiado ({len(text)} caracteres)" if text
                                    else "nada que copiar: abre una entrada del log (s) o un subagente", now + 3)
+                    continue
+                if keys == b"D":
+                    doc = next((p for p in reversed(focus.docs) if os.path.isfile(p)), None) if focus else None
+                    why = open_doc(cfg, doc) if doc else "esta sesión no ha escrito ningún .md"
+                    if why == "tty":   # sin tmux: el visor toma la terminal hasta que se cierre
+                        live.stop()
+                        if saved is not None:
+                            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+                        subprocess.run(viewer_command(cfg, doc), shell=True)
+                        if fd is not None:
+                            tty.setcbreak(fd)
+                        live.start(refresh=True)
+                        why = ""
+                    ui["flash"] = (why or f"abierto {os.path.basename(doc)}", now + 4)
                     continue
                 if keys == b"x":
                     ui["toasts"].clear()
@@ -3212,6 +3459,10 @@ def main():
     p.add_argument("dir")
     sub.add_parser("config", help="muestra la ruta del archivo de configuración")
     sub.add_parser("update", help="trae los cambios del repo y reinstala")
+    p = sub.add_parser("view", help="abre un archivo con el visor configurado")
+    p.add_argument("file")
+    p = sub.add_parser("hook", help="hook de Claude Code que abre el documento a revisar (install, remove, status)")
+    p.add_argument("action", nargs="?", choices=("install", "remove", "status"))
     p = sub.add_parser("set", help="cambia un umbral u opción; sin argumentos los lista")
     p.add_argument("key", nargs="?")
     p.add_argument("value", nargs="?")
@@ -3227,10 +3478,20 @@ def main():
                 print(f"{key:<14} {cfg[key]:<6} {what} (por defecto {default})")
             for key, what in SWITCHES.items():
                 print(f"{key:<14} {'true' if cfg[key] else 'false':<6} {what}")
+            for key, (_, what) in TEXTS.items():
+                print(f"{key:<14} {json.dumps(cfg[key], ensure_ascii=False)}  {what}")
             return
         if args.value is None:
             sys.exit("cc-dash: falta el valor; uso: cc-dash set CLAVE VALOR")
-        if args.key in LIMITS:
+        if args.key in TEXTS:
+            cfg[args.key] = args.value.strip()
+            if args.key == "spec_match":
+                try:
+                    re.compile(cfg[args.key])
+                except re.error as exc:
+                    sys.exit(f"cc-dash: spec_match no es una expresión regular válida: {exc}")
+                cfg[args.key] = cfg[args.key] or SPEC_MATCH
+        elif args.key in LIMITS:
             if not args.value.isdigit():
                 sys.exit(f"cc-dash: {args.key} necesita un número entero mayor o igual que 0")
             cfg[args.key] = max(1, int(args.value)) if args.key == "toast_max" else int(args.value)
@@ -3242,6 +3503,19 @@ def main():
             sys.exit(f"cc-dash: clave desconocida '{args.key}'; `cc-dash set` lista las disponibles")
         save_config(cfg)
         print(f"{args.key} = {str(cfg[args.key]).lower() if isinstance(cfg[args.key], bool) else cfg[args.key]}")
+        return
+    if args.cmd == "hook" and args.action is None:
+        run_hook(cfg)
+        return
+    if args.cmd == "view":
+        path = os.path.abspath(os.path.expanduser(args.file))
+        if not os.path.isfile(path):
+            sys.exit(f"cc-dash: {path} no es un archivo")
+        why = open_doc(cfg, path)
+        if why == "tty":
+            sys.exit(subprocess.run(viewer_command(cfg, path), shell=True).returncode)
+        if why:
+            sys.exit(f"cc-dash: {why}")
         return
     if args.cmd == "update":
         update()
@@ -3276,6 +3550,10 @@ def main():
     accounts = resolve_accounts(cfg)
     if args.cmd == "accounts":
         cmd_accounts(accounts, cfg["disabled"])
+        return
+    if args.cmd == "hook":
+        chosen = [a for a in accounts if not args.account or a.name in args.account]
+        manage_hooks(chosen, args.action)
         return
     if args.cmd in ("disable", "enable"):
         if args.name not in {a.name for a in accounts}:
