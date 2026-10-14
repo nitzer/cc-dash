@@ -64,15 +64,20 @@ flechas) se mueven, `gg` va al primero y `G` al último:
   cursor.
 - **panel derecho:** en la actividad, un cursor recorre las líneas. `Enter`
   despliega o pliega la lista bajo el cursor (herramientas, archivos,
-  skills…) para verla entera. `e` sobre un archivo (editado o leído) muestra en
-  un popup lo que cambió según git, con colores:
-  - los cambios sin commitear respecto al último commit;
-  - si es nuevo y git no lo sigue, el archivo entero como añadido;
+  skills…) para verla entera. `e` sobre un archivo (editado o leído) lo abre
+  en un popup entero, con colores de sintaxis y lo que cambió según git
+  resaltado: las líneas nuevas sobre verde, las cambiadas sobre ámbar y las
+  borradas en rojo donde estaban. Cada bloque de cambios empieza con `◆`; el
+  visor arranca en el primero, y `n`/`N` saltan al siguiente o al anterior.
+  Contra qué se compara:
+  - si tiene cambios sin commitear, contra el último commit;
+  - si es nuevo y git no lo sigue, todo cuenta como añadido;
   - si no tiene cambios pendientes, el último commit que lo tocó (útil si la
     sesión ya commiteó).
 
-  La barra inferior dice cuál de los tres casos es. Fuera de un repositorio
-  git lo avisa y no abre nada. En respuestas, prompts, tareas o novedades, `j`/`k`
+  La cabecera dice cuál de los tres casos es y cuántas líneas se añadieron,
+  cambiaron y borraron. Fuera de un repositorio git muestra el archivo con
+  colores, sin marcas. También desde la terminal: `cc-dash changes ARCHIVO`. En respuestas, prompts, tareas o novedades, `j`/`k`
   desplazan el texto.
 
 Las principales:

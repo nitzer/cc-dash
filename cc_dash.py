@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.38.0"
+__version__ = "0.39.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2774,7 +2774,7 @@ KEYS = [
         ("j k", "se mueve dentro del panel con el foco"),
         ("gg  ·  G", "primero  ·  último"),
         ("Enter", "agentes: foco · log: detalle · actividad: despliega la lista"),
-        ("e", "actividad: git diff del archivo bajo el cursor"),
+        ("e", "actividad: el archivo con sus cambios resaltados"),
     ]),
     ("General", [
         ("?", "esta ayuda"),
@@ -3024,7 +3024,7 @@ def mode_hint(ui):
     if free and ui["pane"] == "agentes":
         return "agentes · j/k elige · gg/G primero/último · Enter foco · r/p respuesta/prompt · tab panel"
     if free and ui["pane"] == "detalle":
-        return ("actividad · j/k mueve · Enter despliega la lista · e git diff del archivo · gg/G · tab panel" if ui["dkind"] == "list"
+        return ("actividad · j/k mueve · Enter despliega la lista · e cambios del archivo · gg/G · tab panel" if ui["dkind"] == "list"
                 else "panel derecho · j/k desplaza · gg/G principio/final · tab panel")
     if ui["settings"] is not None:
         return "configuración: j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar"
@@ -3270,32 +3270,143 @@ def is_doc(path):
 CODE_VIEWERS = ("bat --paging=always", "batcat --paging=always", "less -R", "more")   # para lo que no es .md
 
 
-def diff_command(path):
-    """Orden que muestra lo que cambió en `path` según git, y una nota para el usuario.
+def change_source(path):
+    """Contra qué comparar `path` en git. Devuelve (argumentos de git diff o None, nota).
 
-    Cambios sin commitear; si el archivo es nuevo, entero como añadido; si no hay cambios
-    pendientes, el último commit que lo tocó. (None, motivo) si no se puede."""
+    Cambios sin commitear; si es nuevo y git no lo sigue, todo es añadido ([]); si no hay
+    cambios pendientes, el último commit que lo tocó. (None, motivo) si no se puede."""
     where = os.path.dirname(path) or "."
 
-    def rc(*args):
+    def run(*args):
         try:
-            return git(where, *args, timeout=5).returncode
+            return git(where, *args, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
-            return -1
+            return None
 
-    if not os.path.isdir(where) or rc("rev-parse", "--show-toplevel") != 0:
+    top = run("rev-parse", "--show-toplevel")
+    if not os.path.isdir(where) or top is None or top.returncode != 0:
         return None, "no está en un repositorio git"
-    q = shlex.quote(path)
-    pager = "less -R" if shutil.which("less") else "more"
-    base = f"cd {shlex.quote(where)} && git --no-pager"
-    tracked = rc("ls-files", "--error-unmatch", "--", path) == 0
-    if not tracked:
+    known = run("ls-files", "--error-unmatch", "--", path)
+    if known is None or known.returncode != 0:
         if not os.path.isfile(path):
             return None, "ya no existe y git no lo conoce"
-        return f"{base} diff --no-index --color=always /dev/null {q} | {pager}", "archivo nuevo, sin seguimiento"
-    if rc("diff", "--quiet", "HEAD", "--", path) == 1:   # hay cambios respecto al último commit
-        return f"{base} diff --color=always HEAD -- {q} | {pager}", "cambios sin commitear"
-    return f"{base} log -p -1 --color=always -- {q} | {pager}", "sin cambios pendientes: último commit que lo tocó"
+        return [], "archivo nuevo, sin seguimiento"
+    pending = run("diff", "--quiet", "HEAD", "--", path)
+    if pending is not None and pending.returncode == 1:
+        return ["HEAD"], "cambios sin commitear"
+    last = run("log", "-1", "--format=%H", "--", path)
+    sha = last.stdout.strip() if last is not None else ""
+    if not sha:
+        return [], "sin historial"
+    parent = run("rev-parse", "--verify", "--quiet", f"{sha}^")
+    if parent is None or parent.returncode != 0:
+        return [], "creado en el primer commit"
+    return [f"{sha}^", sha], f"sin cambios pendientes: último commit {sha[:7]}"
+
+
+def changed_lines(path, against):
+    """Líneas añadidas y cambiadas (número en el archivo actual) y las borradas, por posición."""
+    added, modified, removed = set(), set(), {}   # removed: línea antes de la que iban -> [texto]
+    if not against:
+        return added, modified, removed
+    where = os.path.dirname(path) or "."
+    try:
+        out = git(where, "diff", "-U0", "--no-color", *against, "--", path, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return added, modified, removed
+    gone, at = [], 0
+    for line in out.splitlines():
+        hunk = re.match(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if hunk:
+            if gone:
+                removed.setdefault(at, []).extend(gone)
+            old_n = int(hunk.group(1) if hunk.group(1) is not None else 1)
+            start, new_n = int(hunk.group(2)), int(hunk.group(3) if hunk.group(3) is not None else 1)
+            gone, at = [], start if new_n else start + 1
+            for n in range(start, start + new_n):
+                (modified if old_n else added).add(n)
+        elif line.startswith("-") and not line.startswith("---"):
+            gone.append(line[1:])
+    if gone:
+        removed.setdefault(at, []).extend(gone)
+    return added, modified, removed
+
+
+def show_changes(path):
+    """`cc-dash changes ARCHIVO`: el archivo entero con colores de sintaxis y lo que cambió resaltado.
+
+    Las líneas nuevas van sobre verde, las cambiadas sobre ámbar y las borradas aparecen en rojo
+    donde estaban. Cada bloque de cambios empieza con ◆: en el visor, n y N saltan entre ellos."""
+    from rich.syntax import Syntax
+    against, note = change_source(path)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            code = fh.read()
+    except OSError as exc:
+        sys.exit(f"cc-dash: {exc}")
+    added, modified, removed = changed_lines(path, against) if against is not None else (set(), set(), {})
+    if against == []:   # archivo nuevo: todo es añadido
+        added = set(range(1, code.count("\n") + 2))
+    try:
+        lexer = Syntax.guess_lexer(path, code)
+    except Exception:
+        lexer = "text"
+    lines = Syntax(code, lexer, theme="monokai", background_color="default").highlight(code).split("\n")
+    if lines and not lines[-1].plain and code.endswith("\n"):
+        lines = lines[:-1]
+    width = shutil.get_terminal_size((120, 40)).columns
+    green, amber, red = "#12341f", "#3a3410", "#3d1418"
+    out = []
+    head = Text(no_wrap=True)
+    head.append(f" {path.replace(HOME, '~')}", style="bold")
+    head.append(f"  ·  {note}  ·  ", style=DIM)
+    head.append(f"+{len(added)} ", style=f"bold {TOOL}")
+    head.append(f"~{len(modified)} ", style=f"bold {WAIT}")
+    head.append(f"-{sum(len(v) for v in removed.values())}", style=f"bold {ERR}")
+    head.append("   n/N siguiente/anterior cambio · q cierra", style=DIM)
+    out += [head, Text("")]
+    num_w = len(str(len(lines))) + 1
+    changed = added | modified
+    starts = {n for n in changed if n - 1 not in changed} | set(removed)   # donde empieza cada bloque
+    for n, text in enumerate(lines, 1):
+        for k, ghost in enumerate(removed.get(n, [])):
+            row = Text(no_wrap=True)
+            row.append(f"{'':>{num_w}} ", style=DIM)
+            row.append("◆" if k == 0 else "▌", style=f"bold {ERR}")
+            row.append(" " + ghost, style=f"{ERR} on {red}")
+            row.pad_right(max(0, width - len(row.plain)))
+            row.stylize(f"on {red}", num_w + 2)
+            out.append(row)
+        row = Text(no_wrap=True)
+        new, mod = n in added, n in modified
+        row.append(f"{n:>{num_w}} ", style=FG if new or mod else LINE)
+        mark = "◆" if (new or mod) and n in starts and not removed.get(n) else "▌" if new or mod else " "
+        row.append(mark, style=f"bold {TOOL if new else WAIT}")
+        row.append(" ")
+        row.append_text(text)
+        if new or mod:
+            row.pad_right(max(0, width - len(row.plain)))
+            row.stylize(f"on {green if new else amber}", num_w + 2)
+        out.append(row)
+    for n in sorted(k for k in removed if k > len(lines)):   # borrado al final del archivo
+        for ghost in removed[n]:
+            out.append(Text(f"{'':>{num_w}} ◆ {ghost}", style=f"{ERR} on {red}"))
+    console = Console(force_terminal=True, color_system="truecolor", width=width, highlight=False)
+    with console.capture() as cap:
+        for row in out:
+            console.print(row, soft_wrap=True)
+    data = cap.get()
+    if sys.stdout.isatty() and shutil.which("less"):
+        first = "-p◆" if starts or removed else ""
+        # -j6: el primer cambio queda en la sexta fila, con la cabecera y algo de contexto encima
+        subprocess.run(["less", "-RS", "-j6", *([first] if first else [])], input=data.encode(), check=False)
+    else:
+        sys.stdout.write(data)
+
+
+def self_command():
+    """Cómo volver a llamar a este mismo cc-dash (el intérprete y el módulo que están corriendo)."""
+    return f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))}"
 
 
 def viewer_command(cfg, path):
@@ -3945,15 +4056,18 @@ def run(accounts, once, cfg):
                     title = ui["dmarks"].get(ui["dcur"]) or ""
                     item = ui["ditems"].get(ui["dcur"])
                     if not (item and title.startswith("archivos")):
-                        ui["flash"] = ("e muestra el git diff: pon el cursor sobre un archivo", now + 3)
+                        ui["flash"] = ("e muestra los cambios: pon el cursor sobre un archivo", now + 3)
                         continue
                     path = os.path.join(focus.cwd if focus else "", item)
-                    cmd, note = diff_command(path)
-                    if cmd is None:
+                    against, note = change_source(path)
+                    if against is None and not os.path.isfile(path):
                         ui["flash"] = (f"{os.path.basename(path)}: {note}", now + 3)
                     else:
-                        view_doc(path, cmd=cmd, note=f"{os.path.basename(path)}: {note}",
-                                 title=f" diff · {os.path.basename(path)} · {note} ")
+                        if against is None:
+                            note += ": solo el archivo, sin cambios marcados"
+                        view_doc(path, cmd=f"{self_command()} changes {shlex.quote(path)}",
+                                 note=f"{os.path.basename(path)}: {note}",
+                                 title=f" cambios · {os.path.basename(path)} · {note} ")
                     continue
                 if pane == "detalle" and ui["dkind"] == "list" and (
                         down or up or first or last or keys in (b"\r", b"\n", b"l", b" ", b"b", b"\x1b[6~", b"\x1b[5~")):
@@ -4106,6 +4220,8 @@ def main():
     sub.add_parser("update", help="trae los cambios del repo y reinstala")
     p = sub.add_parser("view", help="abre un archivo con el visor configurado")
     p.add_argument("file")
+    p = sub.add_parser("changes", help="muestra un archivo con colores y lo que cambió según git resaltado")
+    p.add_argument("file")
     p = sub.add_parser("hook", help="hook de Claude Code que abre el documento a revisar (install, remove, status)")
     p.add_argument("action", nargs="?", choices=("install", "remove", "status"))
     p = sub.add_parser("set", help="cambia un umbral u opción; sin argumentos los lista")
@@ -4151,6 +4267,9 @@ def main():
         return
     if args.cmd == "hook" and args.action is None:
         run_hook(cfg)
+        return
+    if args.cmd == "changes":
+        show_changes(os.path.abspath(os.path.expanduser(args.file)))
         return
     if args.cmd == "view":
         path = os.path.abspath(os.path.expanduser(args.file))
