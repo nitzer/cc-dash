@@ -68,9 +68,11 @@ si falla, el rostro se agrieta y los ojos quedan en `x`.
 
 El panel a la derecha del log muestra el subagente seleccionado (respuesta o
 prompt) o, si no hay ninguno, la actividad de la sesión: porcentaje de la
-ventana de contexto, tokens y caché, turnos, herramientas más usadas, errores,
-skills, archivos editados y leídos, servidores MCP, subagentes por tipo, hooks
-y líneas de código cambiadas.
+ventana de contexto, tokens y caché, turnos y git, en filas de estado; debajo,
+como listas de una entrada por línea con su cuenta y una barra proporcional,
+las herramientas usadas (y cuántas fallaron), skills, archivos editados (con la
+ruta relativa a la carpeta de la sesión), servidores MCP, subagentes por tipo
+y hooks. Si no cabe, `AvPág`/`RePág` lo desplazan.
 
 La ventana de contexto no figura en los transcripts: se asume 1M si el modelo
 lo indica (`[1m]`) o si el contexto ya pasa de 200k, y 200k en otro caso.

@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2025,9 +2025,17 @@ def log_cursor(events, lg):
     return next((i for i, e in enumerate(events) if e is lg["cur"]), len(events) - 1)
 
 
-def stats_panel(store, s, now):
+def short_path(path, cwd, n):
+    """Ruta relativa a la carpeta de la sesión; si no cabe, se recorta por la izquierda."""
+    if cwd and path.startswith(cwd.rstrip("/") + "/"):
+        path = path[len(cwd.rstrip("/")) + 1:]
+    path = path.replace(HOME, "~")
+    return path if len(path) <= n else "…" + path[-(n - 1):]
+
+
+def stats_panel(store, s, now, ui=None, rows=40, width=60):
     """Actividad de la sesión enfocada: lo que se muestra sin subagente seleccionado."""
-    t = Text()
+    t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
 
@@ -2035,8 +2043,23 @@ def stats_panel(store, s, now):
         t.append(f"{label:<11}", style=DIM)
         t.append(value + "\n", style=style)
 
-    def counts(c, n=5):
-        return " · ".join(f"{k} ×{v}" for k, v in c.most_common(n)) + (f" · +{len(c) - n} más" if len(c) > n else "")
+    def listing(title, items, color, total=None, extra="", limit=8, names=None):
+        """Sección en columna: un elemento por línea, con su cuenta y una barra proporcional."""
+        items = list(items)
+        t.append("\n" + title.upper(), style=f"bold {color}")
+        t.append(f"  {total if total is not None else sum(n for _, n in items)}" + (f" · {extra}" if extra else "") + "\n",
+                 style=DIM)
+        cap = max(12, min(40, width - 24))
+        shown_names = [names(name, cap) if names else trunc(name, cap) for name, _ in items[:limit]]
+        name_w = max([8] + [len(x) for x in shown_names])
+        top = max((n for _, n in items), default=1)
+        for shown, (name, n) in zip(shown_names, items[:limit]):
+            t.append(f"  {shown:<{name_w}}", style=FG)
+            t.append(f" {n:>4}  ", style=color)
+            t.append("▮" * max(1, round(8 * n / top)), style=blend(LINE, color, 0.7))
+            t.append("\n")
+        if len(items) > limit:
+            t.append(f"  +{len(items) - limit} más\n", style=DIM)
 
     row("modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
                                          s.perm and f"permisos {s.perm}") if x))
@@ -2086,26 +2109,38 @@ def stats_panel(store, s, now):
         code.append(f"+{s.lines[0]} −{s.lines[1]} líneas")
     if code:
         row("git", " · ".join(code))
-    tools = counts(s.tool_counts) or "ninguna"
-    row("tools", tools + (f" · {s.errors} con error" if s.errors else ""), TOOL if s.tool_counts else DIM)
+    if s.tool_counts:
+        listing("tools", s.tool_counts.most_common(), TOOL, extra=f"{s.errors} con error" if s.errors else "")
     if s.skills:
-        row("skills", counts(s.skills), ADVISOR)
+        listing("skills", s.skills.most_common(), ADVISOR)
     if s.edits or s.reads:
-        names = Counter()
-        for path, n in s.edits.items():
-            names[os.path.basename(path)] += n
         only_read = len(s.reads - set(s.edits))
-        files = counts(names, 4) if names else "ninguno editado"
-        row("archivos", files + (f" · {only_read} solo leído{'s' if only_read != 1 else ''}" if only_read else ""), LEAD if names else DIM)
+        listing("archivos editados", s.edits.most_common(), LEAD, total=len(s.edits),
+                extra=f"{only_read} solo leído{'s' if only_read != 1 else ''}" if only_read else "",
+                names=lambda p, n: short_path(p, s.cwd, n))
     if s.mcp:
-        row("mcp", counts(s.mcp))
+        listing("mcp", s.mcp.most_common(), FG)
     agents = store.agents(s)
     if agents:
         live = sum(1 for v in agents if v["running"])
-        row("subagentes", counts(Counter(v["type"] for v in agents)) + (f" · {live} en marcha" if live else ""), SWARM)
+        listing("subagentes", Counter(v["type"] for v in agents).most_common(), SWARM,
+                extra=f"{live} en marcha" if live else "")
     if s.hooks:
-        row("hooks", counts(s.hooks))
-    return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
+        listing("hooks", s.hooks.most_common(), DIM)
+    # el panel se desplaza con AvPág/RePág cuando las listas no caben
+    lines = t.split("\n", allow_blank=True)
+    if lines and not lines[-1].plain:
+        lines = lines[:-1]
+    body_rows = max(1, rows - 2)
+    top = 0
+    if ui is not None:
+        ui["rows"] = body_rows
+        top = ui["scroll"] = max(0, min(ui["scroll"], len(lines) - body_rows))
+    body = Text("\n", no_wrap=True, overflow="ellipsis").join(lines[top: top + body_rows])
+    more = len(lines) - top - body_rows
+    pos = f"{top + 1}–{min(len(lines), top + body_rows)} de {len(lines)}" + (" ↓" if more > 0 else "")
+    return Panel(body, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE,
+                 subtitle=pos if len(lines) > body_rows else None, subtitle_align="right")
 
 
 def tasks_panel(store, s, ui, rows, width, now):
@@ -2227,7 +2262,7 @@ def detail_panel(store, s, ui, rows, width, now):
         ui["sel"] = None
         if ui["news"]:
             return news_panel(store, ui, rows, width, now)
-        return tasks_panel(store, s, ui, rows, width, now) if ui["tasks"] else stats_panel(store, s, now)
+        return tasks_panel(store, s, ui, rows, width, now) if ui["tasks"] else stats_panel(store, s, now, ui, rows, width)
     v = agents[i]
     prompt = ui["tab"] == "prompt"
     text = v["prompt"] if prompt else v["response"]
