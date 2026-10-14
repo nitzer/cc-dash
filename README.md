@@ -62,9 +62,11 @@ flechas) se mueven, `gg` va al primero y `G` al último:
   entrada, la salida y los parámetros completos (`j`/`k` desplazan, `y` copia,
   `Esc` o `Enter` cierran). El panel derecho ya no cambia solo al mover el
   cursor.
-- **panel derecho:** en la actividad, un cursor recorre las líneas y `Enter`
-  despliega o pliega la lista bajo el cursor (herramientas, archivos, skills…)
-  para verla entera. En respuestas, prompts, tareas o novedades, `j`/`k`
+- **panel derecho:** en la actividad, un cursor recorre las líneas. `Enter`
+  sobre un archivo (editado o leído) lo abre en un popup: los `.md` con el
+  visor configurado y el resto con `bat`, o `less` si no está. Sobre cualquier
+  otra línea, `Enter` despliega o pliega esa lista (herramientas, archivos,
+  skills…) para verla entera. En respuestas, prompts, tareas o novedades, `j`/`k`
   desplazan el texto.
 
 Las principales:

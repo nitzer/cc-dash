@@ -47,7 +47,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.37.0"
+__version__ = "0.37.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -2254,6 +2254,8 @@ def add_listing(t, width, title, items, color, total=None, extra="", limit=8, na
     name_w = max([8] + [len(x) for x in shown_names])
     top = max((n for _, n in items), default=1)
     for shown, (name, n) in zip(shown_names, items[:limit]):
+        if ctx is not None:
+            ctx.setdefault("items", {})[t.plain.count("\n")] = name   # para abrir el archivo con Enter
         t.append(f"  {shown:<{name_w}}", style=FG)
         t.append(f" {n:>4}  ", style=color)
         t.append("▮" * max(1, round(8 * n / top)), style=blend(LINE, color, 0.7))
@@ -2336,9 +2338,9 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
     t = Text(no_wrap=True, overflow="ellipsis")
     if s is None:
         return Panel(t, title=label("actividad", "STAT"), title_align="left", box=PANEL_BOX, border_style=LINE)
-    ctx = {"open": ui["open"] if ui is not None else set(), "marks": {}}
+    ctx = {"open": ui["open"] if ui is not None else set(), "marks": {}, "items": {}}
     if ui is not None:
-        ui["dkind"], ui["dmarks"] = "list", ctx["marks"]
+        ui["dkind"], ui["dmarks"], ui["ditems"] = "list", ctx["marks"], ctx["items"]
 
     def row(label, value, style=FG):
         t.append(f"{label:<11}", style=DIM)
@@ -2551,8 +2553,8 @@ def detail_panel(store, s, ui, rows, width, now):
         t.append(" ")
         t.append(" p prompt ", style=DIM)
         t.append("\n\n")
-        ctx = {"open": ui["open"], "marks": {}}
-        ui["dkind"], ui["dmarks"] = "list", ctx["marks"]
+        ctx = {"open": ui["open"], "marks": {}, "items": {}}
+        ui["dkind"], ui["dmarks"], ui["ditems"] = "list", ctx["marks"], ctx["items"]
         agent_stats(t, s, v, now, width, ctx)
         body, pos = scrolled(t, ui, rows, cursor=ui["pane"] == "detalle", width=width)
         return Panel(body, title=trunc(f"◎ {head} · {v['desc']}", max(10, width - 6)), title_align="left",
@@ -2771,7 +2773,7 @@ KEYS = [
         ("Tab  ·  Shift+Tab", "pasa el foco al panel siguiente o anterior"),
         ("j k", "se mueve dentro del panel con el foco"),
         ("gg  ·  G", "primero  ·  último"),
-        ("Enter", "agentes: foco · log: detalle flotante · actividad: despliega"),
+        ("Enter", "agentes: foco · log: detalle · actividad: abre archivo o despliega"),
     ]),
     ("General", [
         ("?", "esta ayuda"),
@@ -3021,7 +3023,7 @@ def mode_hint(ui):
     if free and ui["pane"] == "agentes":
         return "agentes · j/k elige · gg/G primero/último · Enter foco · r/p respuesta/prompt · tab panel"
     if free and ui["pane"] == "detalle":
-        return ("actividad · j/k mueve · Enter despliega la lista · gg/G · tab panel" if ui["dkind"] == "list"
+        return ("actividad · j/k mueve · Enter abre el archivo o despliega la lista · gg/G · tab panel" if ui["dkind"] == "list"
                 else "panel derecho · j/k desplaza · gg/G principio/final · tab panel")
     if ui["settings"] is not None:
         return "configuración: j/k mover · h/l cambiar · Enter alterna · r por defecto · Esc cerrar"
@@ -3042,7 +3044,7 @@ def new_ui():
             "focus": None,                # subagente enfocado (tecla F): todo se centra en él
             "pane": "sesiones",           # panel con el foco del teclado (Tab): sesiones, agentes, log, detalle
             "panes": ["sesiones", "agentes", "log", "detalle"],   # los que se ven ahora
-            "dcur": 0, "dlines": 0, "dkind": "text", "dmarks": {},   # cursor del panel derecho
+            "dcur": 0, "dlines": 0, "dkind": "text", "dmarks": {}, "ditems": {},   # cursor del panel derecho
             "open": set(),                # listas desplegadas en la actividad
             "g_at": 0.0,                  # cuándo llegó una g, para reconocer gg
             "entry": None,                # entrada del log abierta en ventana flotante (Enter)
@@ -3264,9 +3266,17 @@ def is_doc(path):
     return isinstance(path, str) and path.lower().endswith((".md", ".markdown", ".mdx"))
 
 
+CODE_VIEWERS = ("bat --paging=always", "batcat --paging=always", "less -R", "more")   # para lo que no es .md
+
+
 def viewer_command(cfg, path):
-    """Orden de shell que abre `path`: la configurada o el primer visor instalado."""
-    cmd = cfg["viewer"] or next((v for v in VIEWERS if shutil.which(v.split()[0])), "")
+    """Orden de shell que abre `path`: la configurada o el primer visor instalado.
+
+    Un visor solo de markdown (glow, mdcat) no sirve para código: ahí se usa bat o less."""
+    cmd = cfg["viewer"]
+    if not is_doc(path) and (not cmd or cmd.split()[0] in ("glow", "mdcat", "frogmouth")):
+        cmd = next((v for v in CODE_VIEWERS if shutil.which(v.split()[0])), "")
+    cmd = cmd or next((v for v in VIEWERS if shutil.which(v.split()[0])), "")
     if not cmd:
         return ""
     return cmd.replace("{file}", shlex.quote(path)) if "{file}" in cmd else f"{cmd} {shlex.quote(path)}"
@@ -3907,7 +3917,14 @@ def run(accounts, once, cfg):
                     n = max(1, ui["dlines"])
                     if keys in (b"\r", b"\n", b"l"):
                         title = ui["dmarks"].get(ui["dcur"])
-                        if title:
+                        item = ui["ditems"].get(ui["dcur"])
+                        if item and title and title.startswith("archivos"):   # un archivo: se abre
+                            path = os.path.join(focus.cwd if focus else "", item)
+                            if os.path.isfile(path):
+                                view_doc(path)
+                            else:
+                                ui["flash"] = (f"{os.path.basename(path)} ya no existe", now + 3)
+                        elif title:
                             ui["open"] ^= {title}
                     else:
                         step = 1 if down else -1 if up else page if keys in (b" ", b"\x1b[6~") else -page
