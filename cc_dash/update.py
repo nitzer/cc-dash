@@ -9,7 +9,6 @@ from . import __version__
 from .config import data_dir
 from .repo import git
 
-
 UPDATE_EVERY = 6 * 3600  # segundos entre comprobaciones automáticas
 
 

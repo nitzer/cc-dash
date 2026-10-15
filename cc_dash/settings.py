@@ -8,8 +8,7 @@ from rich.text import Text
 
 from .config import LAYOUTS, VIEWERS, apply_limits, save_config
 from .text import HOME, trunc
-from .theme import C, THEMES, apply_theme, label
-
+from .theme import THEMES, C, apply_theme, label
 
 # (clave, nombre, tipo, opciones o paso, valor por defecto, ayuda); None separa secciones
 SETTINGS = [

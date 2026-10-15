@@ -11,7 +11,7 @@ Uso:    cc-dash [--once] [-a CUENTA]
         cc-dash disable CUENTA | enable CUENTA
         cc-dash set CLAVE VALOR     (umbrales y opciones; `cc-dash set` las lista)
 """
-__version__ = "0.43.2"
+__version__ = "0.44.0"
 
 from .cli import main  # después de __version__, que cli importa
 

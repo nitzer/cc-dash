@@ -22,14 +22,13 @@ from .config import LAYOUTS, LIMITS, TEXTS, apply_limits, config_path, load_conf
 from .external import copy_text, jump, notify, open_doc, self_command, viewer_command
 from .faces import FACES, reached_tier
 from .game import EVO, agent_game, lead_game
+from .log_view import log_cursor, log_events, query
 from .model import Store
-from .panels import log_cursor, log_events, query
 from .repo import change_source
 from .screen import boot, new_ui, render, shown_text, watch
 from .settings import apply_config, change_setting, setting_entries
 from .text import is_doc
 from .theme import THEMES, apply_theme
-
 
 CHEATS = ("iddqd", "idkfa")   # sí, esos
 
@@ -86,10 +85,15 @@ def split_keys(raw):
 QUIT = object()   # lo que devuelve un manejador de teclas para salir del dashboard
 
 
-def run(accounts, once, cfg):
-    store = Store(accounts)
+def run(accounts, once, cfg, source=None):
+    store = Store(accounts, source)
     store.off = set(cfg["disabled"])
     store.poll(time.time())
+    if once and hasattr(store.source, "settled"):   # un fotograma: con lo que manden las otras máquinas
+        end = time.time() + 15
+        while not store.source.settled() and time.time() < end:
+            time.sleep(0.2)
+            store.poll(time.time())
     store.ready = True
     dash = Dashboard(store, cfg)
     if once or not sys.stdout.isatty():   # un solo fotograma, sin avisos
@@ -458,6 +462,9 @@ class Dashboard:
 
     def open_last_doc(self):
         focus = self.focus
+        if focus and self.store.is_remote(focus):
+            self.flash("esa sesión está en otra máquina: sus archivos no se pueden abrir desde aquí", 4)
+            return True
         doc = next((p for p in reversed(focus.docs) if os.path.isfile(p)), None) if focus else None
         if doc:
             self.view_doc(doc)
@@ -665,6 +672,9 @@ class Dashboard:
         ui, focus = self.ui, self.focus
         title = ui["dmarks"].get(ui["dcur"]) or ""
         item = ui["ditems"].get(ui["dcur"])
+        if focus and self.store.is_remote(focus):
+            self.flash("esa sesión está en otra máquina: sus archivos no se pueden abrir desde aquí")
+            return
         if not (item and title.startswith("archivos")):
             self.flash("e muestra los cambios: pon el cursor sobre un archivo")
             return
@@ -799,7 +809,7 @@ class Dashboard:
     def cmd_account(self):
         if not self.store.multi:
             return None
-        cycle = [None] + [a.name for a in self.store.active]
+        cycle = [None, *self.store.names()]
         self.account = cycle[(cycle.index(self.account) + 1) % len(cycle)]
         self.focus_sid, self.ui["sel"], self.ui["focus"] = None, None, None
         return True

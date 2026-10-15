@@ -3,17 +3,15 @@
 import json
 import os
 import re
-import subprocess
 import time
 from collections import Counter, deque
 from itertools import pairwise
 
 from .config import limits
-from .repo import git
-from .sources import LocalSource
+from .repo import repo_status
+from .sources import LocalSource, host_of
 from .text import age, block_text, clip, clip_input, clock, is_doc, parse_ts, short_model, short_tool, tool_label
 from .theme import C
-
 
 AGENT_TOOLS = ("Agent", "Task")
 ASK_TOOLS = {"AskUserQuestion": "responder una pregunta", "ExitPlanMode": "aprobar el plan"}
@@ -169,26 +167,49 @@ class Store:
 
     @property
     def multi(self):
-        return len(self.active) > 1
+        return len(self.names()) > 1
+
+    def names(self):
+        """Cuentas a la vista: las de esta máquina que están activas y las remotas."""
+        return [a.name for a in self.active] + sorted(self.source.remote_accounts)
+
+    def is_remote(self, s):
+        return s.account in self.source.remote_accounts
 
     def poll(self, now):
         """Lee lo nuevo de la fuente y lo incorpora."""
         batch = self.source.read(now, self.active)
+        for host in batch.forget:
+            self.forget(host)
         for aid, meta in batch.meta:
             if meta.get("toolUseId"):
                 self.aid_of[meta["toolUseId"]] = aid
             self.agent_type[aid] = meta.get("agentType") or ""
         if batch.live is not None:
             self.live = batch.live
+        ready, self.ready = self.ready, False   # la historia que llega de golpe no genera avisos
+        for account, rec in batch.backlog:
+            self.ingest(rec, account)
+        self.ready = ready
         for account, rec in batch.records:
             self.ingest(rec, account)
-        if batch.records:
+        if batch.records or batch.backlog:
             self.log.sort(key=lambda e: e[0])
             del self.log[:-1000]
 
     def refresh(self):
         """Que la próxima lectura vuelva a buscar archivos y sesiones (p. ej. al activar una cuenta)."""
         self.source.refresh()
+
+    def forget(self, host):
+        """Olvida lo leído de una máquina remota: al reconectar, su agente lo manda todo de nuevo."""
+        gone = {sid for sid, s in self.sessions.items() if s.account in self.source.remote_accounts
+                and host_of(s.account) == host}
+        for sid in gone:
+            del self.sessions[sid]
+        self.log = [e for e in self.log if e[1] not in gone]
+        for key in [k for k in self.daily if k[0] in self.source.remote_accounts and host_of(k[0]) == host]:
+            del self.daily[key]
 
     def event(self, ts, sid, role, tag, text, agent=None, ref=None):
         """`role`: papel de color ("TOOL", "ERR"…), no el color, para que el log siga al tema.
@@ -604,27 +625,13 @@ class Store:
 
     def git_info(self, s, now, refresh=False):
         """Estado de git de la carpeta de la sesión. Solo consulta con `refresh`, y cada 20 s como mucho."""
-        if not s.cwd:
+        if not s.cwd or self.is_remote(s):   # la carpeta está en otra máquina
             return None
         checked, info = self.git_cache.get(s.cwd, (0, None))
         if not refresh or now - checked < 20:
             return info
-        info = None
-        try:
-            status = git(s.cwd, "--no-optional-locks", "status", "--porcelain=v1", "-b", timeout=3)
-            if status.returncode == 0:
-                lines = status.stdout.splitlines()
-                branch = lines[0][3:].split("...")[0] if lines and lines[0].startswith("## ") else ""
-                files = [ln for ln in lines if not ln.startswith("## ")]
-                since = (self.live.get(s.sid) or {}).get("startedAt")
-                since = since / 1000 if since else s.first
-                commits = git(s.cwd, "rev-list", "--count", f"--since={int(since)}", "HEAD", timeout=3) if since else None
-                info = {"branch": branch,
-                        "untracked": sum(1 for ln in files if ln.startswith("??")),
-                        "changed": sum(1 for ln in files if not ln.startswith("??")),
-                        "commits": int(commits.stdout.strip() or 0) if commits and commits.returncode == 0 else 0}
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            pass
+        since = (self.live.get(s.sid) or {}).get("startedAt")
+        info = repo_status(s.cwd, since / 1000 if since else s.first)
         self.git_cache[s.cwd] = (now, info)
         return info
 

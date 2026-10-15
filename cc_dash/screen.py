@@ -10,8 +10,19 @@ from . import __version__
 from .agents_view import board, diagram
 from .config import limits
 from .faces import gallery_panel
-from .panels import (Overlay, detail_panel, event_panel, footer, header, help_panel, log_cursor, log_events,
-                     log_panel, mode_hint, query, session_card, session_panel, side_panel, toast_panel)
+from .log_view import event_panel, log_cursor, log_events, log_panel, query
+from .panels import (
+    Overlay,
+    detail_panel,
+    footer,
+    header,
+    help_panel,
+    mode_hint,
+    session_card,
+    session_panel,
+    side_panel,
+    toast_panel,
+)
 from .settings import settings_panel
 from .text import age, trunc
 from .theme import C

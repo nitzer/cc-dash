@@ -71,3 +71,21 @@ def changed_lines(path, against):
     if gone:
         removed.setdefault(at, []).extend(gone)
     return added, modified, removed
+
+
+def repo_status(cwd, since):
+    """Rama, archivos cambiados y sin seguimiento, y commits desde `since` (epoch) en `cwd`. None si no es git."""
+    try:
+        status = git(cwd, "--no-optional-locks", "status", "--porcelain=v1", "-b", timeout=3)
+        if status.returncode != 0:
+            return None
+        lines = status.stdout.splitlines()
+        branch = lines[0][3:].split("...")[0] if lines and lines[0].startswith("## ") else ""
+        files = [ln for ln in lines if not ln.startswith("## ")]
+        commits = git(cwd, "rev-list", "--count", f"--since={int(since)}", "HEAD", timeout=3) if since else None
+        return {"branch": branch,
+                "untracked": sum(1 for ln in files if ln.startswith("??")),
+                "changed": sum(1 for ln in files if not ln.startswith("??")),
+                "commits": int(commits.stdout.strip() or 0) if commits and commits.returncode == 0 else 0}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None

@@ -10,7 +10,6 @@ from .canvas import hp_color, meter, segs
 from .game import EVO, EVO_GAIN, agent_game
 from .theme import C, blend, breath, label
 
-
 # Rostros en braille con tramado ordenado: cada uno es una función que da la luz de
 # cada píxel (0 negro, 1 brillo, EYE ojo encendido, None fondo). Una celda de braille
 # son 2x4 píxeles, así que un rostro de 6 filas tiene 24x24 píxeles.

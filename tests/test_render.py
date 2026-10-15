@@ -3,10 +3,10 @@ import io
 import time
 
 import pytest
+from builder import SID, SideTranscript, Transcript
 from rich.console import Console
 
 from cc_dash import config, screen, theme
-from builder import SID, SideTranscript, Transcript
 
 LAYOUTS = ("lista", "tabla", "tarjetas", "tiempo", "diagrama")
 SIZES = ((80, 24), (120, 45), (160, 60))

@@ -9,7 +9,6 @@ import tomllib
 from .text import HOME
 from .theme import THEMES
 
-
 DEFAULT_DIR = os.path.join(HOME, ".claude")
 
 
@@ -74,7 +73,7 @@ def limits_default():
 
 
 def load_config():
-    cfg = {"account": [], "scan": [], "include_default": True, "auto_update": True, "layout": "lista",
+    cfg = {"account": [], "scan": [], "remotes": [], "include_default": True, "auto_update": True, "layout": "lista",
            "theme": "clasico", "alerts": True, "effects": True, "toasts": True, "disabled": [],
            "viewer_popup": True, **{key: default for key, (default, _) in TEXTS.items()},
            **limits_default()}
@@ -87,6 +86,7 @@ def load_config():
         sys.exit(f"cc-dash: no se pudo leer {config_path()}: {exc}")
     cfg["account"] = [a for a in raw.get("account", []) if a.get("name") and a.get("path")]
     cfg["scan"] = [d for d in raw.get("scan", []) if isinstance(d, str)]
+    cfg["remotes"] = [h for h in raw.get("remotes", []) if isinstance(h, str) and h.strip()]
     cfg["disabled"] = [n for n in raw.get("disabled", []) if isinstance(n, str)]
     cfg["include_default"] = bool(raw.get("include_default", True))
     cfg["auto_update"] = bool(raw.get("auto_update", True))
@@ -141,6 +141,9 @@ def save_config(cfg):
         "# Umbrales. Se pueden cambiar aquí o con `cc-dash set CLAVE VALOR`; el dashboard los relee solo.",
         *[f"{key} = {cfg[key]}".ljust(22) + f"# {what}" for key, (_, what) in LIMITS.items()],
         "scan = [" + ", ".join(json.dumps(d) for d in cfg["scan"]) + "]",
+        "# remotes: otras máquinas (nombres de ssh) cuyas sesiones se ven aquí; cada una necesita cc-dash",
+        "# instalado y acceso por ssh sin contraseña. `cc-dash remote add HOST` las añade.",
+        "remotes = [" + ", ".join(json.dumps(h) for h in cfg["remotes"]) + "]",
         "# disabled: cuentas que no se muestran ni se leen (ventana de configuración, o enable/disable).",
         "disabled = [" + ", ".join(json.dumps(n) for n in cfg["disabled"]) + "]",
     ]

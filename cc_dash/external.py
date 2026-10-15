@@ -13,8 +13,9 @@ from rich.text import Text
 
 from .config import VIEWERS, limits
 from .repo import change_source, changed_lines
+from .sources import host_of
 from .text import HOME, is_doc, trunc
-from .theme import C, NEWS
+from .theme import NEWS, C
 
 
 def notify(store, ui, sid, kind, text, now):
@@ -45,6 +46,8 @@ def notify(store, ui, sid, kind, text, now):
 
 def jump(store, s):
     """Lleva el cliente de tmux al panel donde corre la sesión. Devuelve el mensaje a mostrar."""
+    if store.is_remote(s):
+        return f"esa sesión corre en {host_of(s.account)}: el salto de panel solo funciona en esta máquina"
     where = re.match(r"(.*):(@\d+)\.(%\d+)$", (store.live.get(s.sid) or {}).get("tmux") or "")
     if not where:
         return "esa sesión no corre dentro de tmux (o ya está cerrada)"

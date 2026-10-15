@@ -1,9 +1,9 @@
 import time
 
 import pytest
+from builder import Account
 
 from cc_dash import config, model, theme
-from builder import Account
 
 
 @pytest.fixture(autouse=True)

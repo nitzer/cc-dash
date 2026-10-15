@@ -14,11 +14,22 @@ from rich.table import Table
 
 from . import __version__
 from .app import run
-from .config import LAYOUTS, LIMITS, SPEC_MATCH, SWITCHES, TEXTS, config_path, load_config, resolve_accounts, save_config
+from .config import (
+    LAYOUTS,
+    LIMITS,
+    SPEC_MATCH,
+    SWITCHES,
+    TEXTS,
+    config_path,
+    load_config,
+    resolve_accounts,
+    save_config,
+)
 from .external import open_doc, show_changes, viewer_command
 from .hooks import manage_hooks, run_hook
+from .sources import LocalSource, RemoteSource, Sources, run_agent
 from .text import HOME
-from .theme import C, THEMES
+from .theme import THEMES, C
 from .update import auto_update, update
 
 
@@ -67,6 +78,10 @@ def parser():
     p.add_argument("file")
     p = sub.add_parser("hook", help="hook de Claude Code que abre el documento a revisar (install, remove, status)")
     p.add_argument("action", nargs="?", choices=("install", "remove", "status"))
+    p = sub.add_parser("remote", help="otras máquinas cuyas sesiones se ven aquí, por ssh (add, remove, list)")
+    p.add_argument("action", nargs="?", choices=("add", "remove", "list"), default="list")
+    p.add_argument("host", nargs="?", help="nombre de ssh de la máquina (como en ~/.ssh/config)")
+    sub.add_parser("agent", help="manda las sesiones de esta máquina por la salida estándar (lo usa `remote`)")
     p = sub.add_parser("set", help="cambia un umbral u opción; sin argumentos los lista")
     p.add_argument("key", nargs="?")
     p.add_argument("value", nargs="?")
@@ -109,7 +124,40 @@ def cmd_dashboard(args, cfg):
         cfg["layout"] = args.layout
     if args.theme:
         cfg["theme"] = args.theme
-    run(accounts, args.once, cfg)
+    source = None
+    if cfg["remotes"]:
+        source = Sources([LocalSource(), *(RemoteSource(h) for h in cfg["remotes"])])
+    try:
+        run(accounts, args.once, cfg, source)
+    finally:
+        if source is not None:
+            source.close()
+
+
+def cmd_agent(args, cfg):
+    run_agent([a for a in resolve_accounts(cfg) if a.name not in cfg["disabled"]])
+
+
+def cmd_remote(args, cfg):
+    if args.action == "list":
+        for host in cfg["remotes"]:
+            print(host)
+        if not cfg["remotes"]:
+            print("ninguna; añade una con `cc-dash remote add HOST`")
+        return
+    if not args.host:
+        sys.exit(f"cc-dash: falta la máquina; uso: cc-dash remote {args.action} HOST")
+    if args.action == "add":
+        if args.host not in cfg["remotes"]:
+            cfg["remotes"].append(args.host)
+        save_config(cfg)
+        print(f"máquina '{args.host}' añadida; necesita cc-dash instalado y ssh sin contraseña")
+        return
+    if args.host not in cfg["remotes"]:
+        sys.exit(f"cc-dash: '{args.host}' no está en {config_path()}")
+    cfg["remotes"].remove(args.host)
+    save_config(cfg)
+    print(f"máquina '{args.host}' quitada")
 
 
 def cmd_config(args, cfg):
@@ -224,4 +272,5 @@ COMMANDS = {
     "config": cmd_config, "set": cmd_set, "hook": cmd_hook, "changes": cmd_changes, "view": cmd_view,
     "update": cmd_update, "add": cmd_add, "remove": cmd_remove, "scan": cmd_scan,
     "accounts": cmd_list_accounts, "disable": cmd_toggle_account, "enable": cmd_toggle_account,
+    "agent": cmd_agent, "remote": cmd_remote,
 }

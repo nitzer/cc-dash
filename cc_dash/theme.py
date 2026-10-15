@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from rich import box
 
-
 # Cada tema da un color a cada papel; dentro de un tema no se repiten.
 THEMES = {
     "clasico": dict(LEAD="#e8915a", SWARM="#6fb1ff", TOOL="#6fcf97", ADVISOR="#b48efc", ERR="#ef6b73",

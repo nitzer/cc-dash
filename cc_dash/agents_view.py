@@ -9,10 +9,21 @@ from rich.text import Text
 
 from .canvas import Canvas, activity_graph, graph_rows, hp_color, meter, segs
 from .config import limits
-from .faces import FACE_SIZE, _visor, agent_face, compact_stats, dither, face_pixels, lead_face, put_cells, put_stats, stat_rows
+from .faces import (
+    FACE_SIZE,
+    _visor,
+    agent_face,
+    compact_stats,
+    dither,
+    face_pixels,
+    lead_face,
+    put_cells,
+    put_stats,
+    stat_rows,
+)
 from .game import EVO, agent_game, lead_game
 from .text import SPIN, age, clock, ktok, short_model, trunc
-from .theme import C, FRESH, STATES, blend, breath
+from .theme import FRESH, STATES, C, blend, breath
 
 
 def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focus=None):

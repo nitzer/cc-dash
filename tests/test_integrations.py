@@ -5,10 +5,10 @@ import subprocess
 import sys
 
 import pytest
-
-from cc_dash import hooks, repo
 from builder import Transcript
 from test_cli import cc
+
+from cc_dash import hooks, repo
 
 
 def sh(cwd, *args):

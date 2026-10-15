@@ -1,8 +1,9 @@
 """Lo que el dashboard entiende de los transcripts: estado, herramientas, subagentes, atascos."""
 import time
 
-from cc_dash import config, game, model
 from builder import SID, SideTranscript, Transcript
+
+from cc_dash import config, game, model
 
 
 def session(store):

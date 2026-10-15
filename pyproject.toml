@@ -26,7 +26,7 @@ line-length = 120
 extend-exclude = ["build"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "C4", "SIM", "UP", "PERF", "RUF", "PLE", "PLW"]
+select = ["E", "F", "W", "B", "C4", "SIM", "UP", "PERF", "RUF", "PLE", "PLW", "I"]
 ignore = [
     "E501",     # líneas largas: el código usa hasta ~120 y no vale la pena partirlas
     "RUF001",   # caracteres unicode "ambiguos": los dibujos de braille y cajas son a propósito

@@ -349,6 +349,36 @@ cabecera (`◆ 1 ESPERA TU RESPUESTA`), en la lista de sesiones y en el panel
 del lead, con lo que necesita (`necesita permiso para Bash: …`). En modo
 automático el dashboard enfoca primero la sesión que espera.
 
+## Otras máquinas
+
+Un solo dashboard puede mostrar las sesiones de varias PCs. En cada máquina
+remota hace falta tener cc-dash instalado y poder entrar por ssh sin
+contraseña (con clave). En la máquina del dashboard:
+
+```sh
+cc-dash remote add pc-oficina     # el nombre de ssh, como en ~/.ssh/config
+cc-dash remote add laptop
+cc-dash remote                    # lista las máquinas
+cc-dash remote remove laptop
+```
+
+Al arrancar, el dashboard ejecuta `ssh MÁQUINA cc-dash agent` por cada una.
+El agente lee las cuentas de esa máquina, con su propia configuración, y
+manda por ssh lo que va pasando. No abre puertos ni necesita contraseñas
+aparte de la clave de ssh.
+
+- Las sesiones remotas se ven como las locales, con la cuenta como
+  `cuenta@máquina` (por ejemplo `default@laptop`); `c` también filtra por ellas.
+- La leyenda de la cabecera muestra cada máquina: `●` conectada, `◌`
+  conectando, `✗` sin conexión. Si una se cae, sus sesiones salen como
+  cerradas y el dashboard reintenta solo cada 10 segundos.
+- Lo que depende de archivos o de tmux de esta máquina no funciona con una
+  sesión remota: saltar a su panel (`Enter`), abrir su `.md` (`D`), la vista de
+  cambios (`e`) y el estado de git.
+- Las dos puntas deben tener versiones compatibles de cc-dash; si no, la
+  máquina sale como sin conexión y lo indica. `auto_update` ayuda a
+  mantenerlas al día.
+
 ## Cuentas
 
 Una cuenta es un directorio de configuración de Claude Code, es decir, el
@@ -385,6 +415,7 @@ theme = "neon"                  # clasico, neon, matrix, ambar, catppuccin-*, te
 alerts = true                   # pitido y aviso de tmux
 effects = true                  # arranque, glitch y lluvia en reposo
 scan = ["/srv/dev/claude"]
+remotes = ["pc-oficina"]        # otras máquinas, por ssh
 
 [[account]]
 name = "trabajo"
@@ -397,7 +428,7 @@ El código está en el paquete `cc_dash/`, un módulo por responsabilidad:
 
 | módulo | qué hace |
 |---|---|
-| `sources` | de dónde salen los datos: `LocalSource` lee las cuentas del disco |
+| `sources` | de dónde salen los datos: `LocalSource` (este disco), `RemoteSource` (otra máquina por ssh) y `cc-dash agent` |
 | `model` | lo que se entiende de los transcripts (un método por tipo de registro): sesiones, subagentes, estado, atascos |
 | `config` | cuentas, `config.toml` y los umbrales vigentes (`limits`) |
 | `theme` | temas y la paleta activa `C` (`C.LEAD`, `C.DIM`…) |
@@ -406,6 +437,7 @@ El código está en el paquete `cc_dash/`, un módulo por responsabilidad:
 | `game` | HP, rondas, niveles y evoluciones |
 | `canvas`, `faces` | lienzo, gráfico de actividad y rostros de braille |
 | `agents_view` | el panel de agentes en sus cinco diseños |
+| `log_view` | el session log y el detalle de cada entrada |
 | `panels`, `settings` | el resto de paneles y la ventana de configuración |
 | `external`, `hooks` | tmux, visores, vista de cambios y el hook de Claude Code |
 | `screen` | compone la pantalla completa y decide qué avisar |

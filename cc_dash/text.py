@@ -4,7 +4,6 @@ import json
 import os
 from datetime import datetime
 
-
 HOME = os.path.expanduser("~")
 
 
