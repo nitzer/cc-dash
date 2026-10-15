@@ -15,6 +15,9 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
+# restos de compilaciones anteriores: setuptools los metería en el paquete
+rm -rf build ./*.egg-info
+
 # cc-dash usa esta ruta para actualizarse (cc-dash update)
 mkdir -p "$DEST"
 pwd > "$DEST/source"
