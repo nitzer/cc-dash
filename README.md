@@ -365,7 +365,9 @@ cc-dash remote remove laptop
 Al arrancar, el dashboard ejecuta `ssh MÁQUINA cc-dash agent` por cada una.
 El agente lee las cuentas de esa máquina, con su propia configuración, y
 manda por ssh lo que va pasando. No abre puertos ni necesita contraseñas
-aparte de la clave de ssh.
+aparte de la clave de ssh. Al conectar manda la historia de los transcripts
+tocados en los últimos 2 días (de los más viejos, solo lo que se añada) y
+recorta cada registro a lo que usa el dashboard, para que pese poco.
 
 - Las sesiones remotas se ven como las locales, con la cuenta como
   `cuenta@máquina` (por ejemplo `default@laptop`); `c` también filtra por ellas.

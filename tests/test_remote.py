@@ -128,3 +128,66 @@ def test_remote_command(tmp_path, acct):
         assert 'remotes = ["laptop"]' in fh.read()
     assert cc(tmp_path, acct, "remote", "remove", "laptop").returncode == 0
     assert cc(tmp_path, acct, "remote", "remove", "laptop").returncode != 0
+
+
+def big_scene():
+    """Una sesión con lo que más pesa: archivos leídos enteros, imágenes, razonamiento y tareas."""
+    tr = (Transcript().prompt("revisa todo")
+          .assistant({"type": "thinking", "thinking": "x" * 50_000},
+                     {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/p/a.py"}})
+          .result("t1", "línea\n" * 20_000)
+          .tool("t2", "Write", file_path="docs/plan.md", content="y" * 100_000).result("t2")
+          .tool("t3", "TodoWrite", todos=[{"content": "a", "activeForm": "haciendo a", "status": "in_progress"}])
+          .tool("t4", "TaskCreate", subject="migrar").result("t4", "Task #3 created")
+          .tool("ag", "Agent", subagent_type="Plan", description="plan", prompt="p" * 9000)
+          .result("ag", "el plan", agentId="z1", resolvedModel="claude-sonnet-5-5", extra="z" * 50_000)
+          .meta("attachment", attachment={"type": "file", "content": "w" * 80_000})
+          .text("listo")
+          .turn_end())
+    tr.records.append({**tr.records[2], "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "image", "source": {"data": "i" * 200_000}}, {"type": "text", "text": "una imagen"}]}]}})
+    return tr
+
+
+def state(store):
+    s = store.sessions[SID]
+    return (s.tools, dict(s.tool_counts), s.out_tokens, s.ctx, s.turns, s.todos, s.docs,
+            [(i["k"], i.get("label"), i.get("res"), i.get("err")) for i in s.items],
+            [(a["type"], a["status"], a["result"], a["model"]) for a in s.agents], [e[2:5] for e in store.log])
+
+
+def test_slim_keeps_what_the_dashboard_uses():
+    tr = big_scene()
+    raw, thin = model.Store([]), model.Store([])
+    for rec in tr.records:
+        raw.ingest(rec, "a")
+        thin.ingest(sources.slim(rec), "a")
+    assert state(thin) == state(raw)
+    before = sum(len(json.dumps(r)) for r in tr.records)
+    after = sum(len(json.dumps(sources.slim(r))) for r in tr.records)
+    assert after < before / 10
+
+
+def test_initial_load_goes_in_chunks(monkeypatch):
+    monkeypatch.setattr(sources, "CHUNK", 2000)
+    batch = sources.Batch(records=[("a", r) for r in big_scene().records], live={})
+    msgs = sources.agent_messages(batch, {}, first=True)
+    assert len(msgs) > 2
+    assert [m.get("ready") for m in msgs] == [None] * (len(msgs) - 1) + [True]
+    assert sum(len(m.get("records", ())) for m in msgs) == len(batch.records)
+
+
+def test_agent_skips_old_transcripts(acct):
+    old = acct.write(Transcript(sid="viejo-0000").prompt("antiguo"))
+    acct.write(Transcript().prompt("reciente"))
+    os.utime(old, (time.time() - 10 * 86400,) * 2)
+    src = sources.LocalSource(since=time.time() - sources.AGENT_HISTORY)
+    accounts = [type("A", (), {"name": "a", "projects": os.path.join(acct.root, "projects"),
+                               "live_dir": os.path.join(acct.root, "sessions")})()]
+    sids = {r["sessionId"] for _, r in src.read(time.time(), accounts).records}
+    assert sids == {SID}
+    with open(old, "a") as fh:   # si la sesión vieja se retoma, lo nuevo sí llega
+        fh.write(json.dumps({"type": "user", "sessionId": "viejo-0000", "message": {"content": "sigo"}}) + "\n")
+    src.t_tail = 0
+    assert {r["sessionId"] for _, r in src.read(time.time(), accounts).records} == {"viejo-0000"}

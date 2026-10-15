@@ -13,6 +13,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .text import block_text, clip
+
 try:
     import termios
 except ImportError:  # Windows
@@ -34,7 +36,8 @@ class LocalSource:
 
     remote_accounts = frozenset()
 
-    def __init__(self):
+    def __init__(self, since=None):
+        self.since = since  # si se da: de los archivos sin tocar desde entonces solo se lee lo que se añada
         self.offsets = {}   # ruta -> bytes ya leídos
         self.files = []     # (ruta, nombre de cuenta)
         self.meta_seen = set()
@@ -55,6 +58,8 @@ class LocalSource:
                           for path in glob.glob(os.path.join(acct.projects, "**", "*.jsonl"), recursive=True)]
             self.t_glob = now
             for path, _ in self.files:
+                if self.since and path not in self.offsets:
+                    self.skip_if_old(path)
                 if os.sep + "subagents" + os.sep in path and path not in self.meta_seen:
                     self.read_meta(path, batch)
         if now - self.t_live > 1:
@@ -65,6 +70,14 @@ class LocalSource:
             for path, account in self.files:
                 batch.records.extend((account, rec) for rec in self.tail(path))
         return batch
+
+    def skip_if_old(self, path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        if st.st_mtime < self.since:
+            self.offsets[path] = st.st_size
 
     def read_meta(self, path, batch):
         """agent-<id>.meta.json enlaza el transcript del subagente con su lanzamiento."""
@@ -153,33 +166,96 @@ def host_of(account):
     return account.rpartition("@")[2]
 
 
-def run_agent(accounts, out=None, interval=0.5):
-    """`cc-dash agent`: lee el disco de esta máquina y escribe cada lote nuevo como una línea JSON.
+AGENT_HISTORY = 2 * 86400   # el agente manda la historia de los transcripts tocados en estos segundos
+CHUNK = 1_000_000           # bytes aproximados por línea: la carga inicial va en trozos
 
-    La primera línea lleva todo lo que hay y "ready"; después, solo lo nuevo, las sesiones abiertas
-    cuando cambian y un latido cada HEARTBEAT segundos. Termina cuando nadie lee la salida."""
+
+def run_agent(accounts, out=None, interval=0.5):
+    """`cc-dash agent`: lee el disco de esta máquina y escribe lo nuevo como líneas JSON.
+
+    Primero la historia reciente (en trozos; el último lleva "ready"); después, solo lo nuevo, las
+    sesiones abiertas cuando cambian y un latido cada HEARTBEAT segundos. Los registros van recortados
+    a lo que usa el dashboard. Termina cuando nadie lee la salida."""
     out = out or sys.stdout
-    source, sent_live, last, first = LocalSource(), None, 0.0, True
+    source = LocalSource(since=time.time() - AGENT_HISTORY)
+    sent_live, last, first = None, 0.0, True
     try:
         while True:
             now = time.time()
             batch = source.read(now, accounts)
-            msg = {"v": PROTOCOL}
-            if batch.records:
-                msg["records"] = batch.records
-            if batch.meta:
-                msg["meta"] = batch.meta
-            if batch.live is not None and batch.live != sent_live:
-                msg["live"] = sent_live = batch.live
-            if first:
-                msg["ready"] = True
-            if len(msg) > 1 or now - last >= HEARTBEAT:
-                out.write(json.dumps(msg, separators=(",", ":")) + "\n")
+            live = batch.live if batch.live is not None and batch.live != sent_live else None
+            sent_live = live if live is not None else sent_live
+            msgs = agent_messages(batch, live, first)
+            if msgs or now - last >= HEARTBEAT:
+                for msg in msgs or [{"v": PROTOCOL}]:
+                    out.write(json.dumps(msg, separators=(",", ":")) + "\n")
                 out.flush()
                 last, first = now, False
             time.sleep(interval)
     except (BrokenPipeError, KeyboardInterrupt):
         pass
+
+
+def agent_messages(batch, live, first):
+    """Los mensajes de un lote: los registros en trozos de unos CHUNK bytes; el último lleva lo demás."""
+    msgs, chunk, size = [], [], 0
+    for account, rec in batch.records:
+        rec = slim(rec)
+        chunk.append((account, rec))
+        size += len(json.dumps(rec, separators=(",", ":")))
+        if size >= CHUNK:
+            msgs.append({"v": PROTOCOL, "records": chunk})
+            chunk, size = [], 0
+    last = {"v": PROTOCOL}
+    if chunk:
+        last["records"] = chunk
+    if batch.meta:
+        last["meta"] = batch.meta
+    if live is not None:
+        last["live"] = live
+    if first:
+        last["ready"] = True
+    if len(last) > 1:
+        msgs.append(last)
+    return msgs
+
+
+# campos de un registro que usa el dashboard; el resto (contenidos de archivos, imágenes,
+# razonamiento) no se manda por la red
+KEEP = {"sessionId", "session_id", "type", "timestamp", "cwd", "gitBranch", "isSidechain", "agentId",
+        "requestId", "aiTitle", "permissionMode", "totalCostUSD", "totalLinesAdded", "totalLinesRemoved",
+        "operation", "content", "subtype", "durationMs", "advisorModel", "effort", "attributionSkill", "isMeta"}
+RESULT_KEEP = ("agentId", "resolvedModel", "isAsync", "status", "backgroundTaskId")
+
+
+def slim(rec):
+    """El registro con solo lo que interpreta Store, y los textos largos recortados como él los recorta."""
+    out = {k: v for k, v in rec.items() if k in KEEP}
+    if isinstance(out.get("content"), str):
+        out["content"] = out["content"][:4000]
+    if isinstance(rec.get("toolUseResult"), dict):
+        out["toolUseResult"] = {k: rec["toolUseResult"][k] for k in RESULT_KEEP if k in rec["toolUseResult"]}
+    att = rec.get("attachment")
+    if isinstance(att, dict):
+        out["attachment"] = {k: att[k] for k in ("type", "hookEvent", "identity") if k in att}
+    msg = rec.get("message")
+    if isinstance(msg, dict):
+        out["message"] = {k: msg[k] for k in ("model", "usage") if k in msg}
+        content = msg.get("content")
+        out["message"]["content"] = content if isinstance(content, str) else [
+            slim_block(b) for b in content or [] if isinstance(b, dict) and b.get("type") != "thinking"]
+    return out
+
+
+def slim_block(b):
+    if b.get("type") == "tool_use":
+        inp = b.get("input")
+        if isinstance(inp, dict):
+            inp = {k: clip(v, 3000) if isinstance(v, str) else v for k, v in inp.items()}
+        return {**b, "input": inp}
+    if b.get("type") == "tool_result":
+        return {**b, "content": clip(block_text(b.get("content")), 6000)}
+    return b
 
 
 class RemoteSource:
