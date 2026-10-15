@@ -390,3 +390,16 @@ scan = ["/srv/dev/claude"]
 name = "trabajo"
 path = "/home/yo/.claude-trabajo"
 ```
+
+## Desarrollo
+
+`./check.sh` revisa la salud del código. La primera vez crea `.venv` con las
+herramientas de `requirements-dev.txt`.
+
+- **ruff:** errores y malas prácticas; la configuración está en
+  `pyproject.toml`.
+- **vulture:** código muerto.
+- **`tools/quality.py`:** complejidad por función (radon), tamaño, funciones
+  largas y nombres locales que tapan uno de fuera. Compara con
+  `quality-baseline.json` y falla si algo empeora. Cuando una métrica mejora,
+  `./check.sh --update` la fija como nueva línea base.

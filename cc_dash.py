@@ -28,6 +28,7 @@ import textwrap
 import time
 import tomllib
 from collections import Counter, deque
+from itertools import pairwise
 from datetime import datetime
 
 from rich import box
@@ -47,7 +48,7 @@ try:
 except ImportError:  # Windows
     termios = None
 
-__version__ = "0.42.0"
+__version__ = "0.42.1"
 
 HOME = os.path.expanduser("~")
 DEFAULT_DIR = os.path.join(HOME, ".claude")
@@ -63,39 +64,31 @@ WAIT = "#f2c94c"      # una sesión detenida esperando al usuario
 CARD_BG = "#1c2740"   # fondo de la tarjeta de detalles de la sesión
 FG = "#c9d1e4"
 
-DONE = "#4f6f9f"      # barra de un subagente ya terminado
 
 # Cada tema da un color a cada papel; dentro de un tema no se repiten.
 THEMES = {
     "clasico": dict(LEAD="#e8915a", SWARM="#6fb1ff", TOOL="#6fcf97", ADVISOR="#b48efc", ERR="#ef6b73",
-                    WAIT="#f2c94c", DIM="#5c6680", LINE="#3b4560", FG="#c9d1e4", CARD_BG="#1c2740",
-                    DONE="#4f6f9f"),
+                    WAIT="#f2c94c", DIM="#5c6680", LINE="#3b4560", FG="#c9d1e4", CARD_BG="#1c2740"),
     "neon": dict(LEAD="#ff2bd6", SWARM="#00e5ff", TOOL="#b6ff00", ADVISOR="#9d4dff", ERR="#ff3355",
-                 WAIT="#fff200", DIM="#7a6fa8", LINE="#3d2a66", FG="#e8e6ff", CARD_BG="#1b0f33",
-                 DONE="#1b8fa3"),
+                 WAIT="#fff200", DIM="#7a6fa8", LINE="#3d2a66", FG="#e8e6ff", CARD_BG="#1b0f33"),
     "matrix": dict(LEAD="#39ff14", SWARM="#00ff9c", TOOL="#b6ff00", ADVISOR="#7dffb0", ERR="#ff4d4d",
-                   WAIT="#eaff00", DIM="#2f8f3a", LINE="#17581f", FG="#b8ffc0", CARD_BG="#06220b",
-                   DONE="#1f9a45"),
+                   WAIT="#eaff00", DIM="#2f8f3a", LINE="#17581f", FG="#b8ffc0", CARD_BG="#06220b"),
     "ambar": dict(LEAD="#ffb000", SWARM="#ffd166", TOOL="#ffe9a8", ADVISOR="#ff8c42", ERR="#ff4d2e",
-                  WAIT="#ffffff", DIM="#9a7526", LINE="#5c4412", FG="#ffdca6", CARD_BG="#261c06",
-                  DONE="#b3832a"),
+                  WAIT="#ffffff", DIM="#9a7526", LINE="#5c4412", FG="#ffdca6", CARD_BG="#261c06"),
     # Catppuccin (catppuccin.com): sus cuatro sabores, de más oscuro a claro (latte es para fondo claro)
     "catppuccin-mocha": dict(LEAD="#fab387", SWARM="#89b4fa", TOOL="#a6e3a1", ADVISOR="#cba6f7", ERR="#f38ba8",
-                             WAIT="#f9e2af", DIM="#6c7086", LINE="#45475a", FG="#cdd6f4", CARD_BG="#313244",
-                             DONE="#9399b2"),
+                             WAIT="#f9e2af", DIM="#6c7086", LINE="#45475a", FG="#cdd6f4", CARD_BG="#313244"),
     "catppuccin-macchiato": dict(LEAD="#f5a97f", SWARM="#8aadf4", TOOL="#a6da95", ADVISOR="#c6a0f6",
                                  ERR="#ed8796", WAIT="#eed49f", DIM="#6e738d", LINE="#494d64", FG="#cad3f5",
-                                 CARD_BG="#363a4f", DONE="#939ab7"),
+                                 CARD_BG="#363a4f"),
     "catppuccin-frappe": dict(LEAD="#ef9f76", SWARM="#8caaee", TOOL="#a6d189", ADVISOR="#ca9ee6", ERR="#e78284",
-                              WAIT="#e5c890", DIM="#737994", LINE="#51576d", FG="#c6d0f5", CARD_BG="#414559",
-                              DONE="#949cbb"),
+                              WAIT="#e5c890", DIM="#737994", LINE="#51576d", FG="#c6d0f5", CARD_BG="#414559"),
     "catppuccin-latte": dict(LEAD="#fe640b", SWARM="#1e66f5", TOOL="#40a02b", ADVISOR="#8839ef", ERR="#d20f39",
-                             WAIT="#df8e1d", DIM="#8c8fa1", LINE="#acb0be", FG="#4c4f69", CARD_BG="#e6e9ef",
-                             DONE="#7c7f93"),
+                             WAIT="#df8e1d", DIM="#8c8fa1", LINE="#acb0be", FG="#4c4f69", CARD_BG="#e6e9ef"),
     # los 16 colores de tu terminal: sigue la paleta que tengas configurada en el shell.
     # LINE es color(8), el mismo gris que bright_black, escrito distinto para que no se repita.
     "terminal": dict(LEAD="magenta", SWARM="blue", TOOL="green", ADVISOR="cyan", ERR="red", WAIT="yellow",
-                     DIM="bright_black", LINE="color(8)", FG="default", CARD_BG="default", DONE="bright_blue",
+                     DIM="bright_black", LINE="color(8)", FG="default", CARD_BG="default",
                      HIGHLIGHT="bright_white", BLOOD="bright_red"),
 }
 # colores de los subagentes por tema; los que no están usan los de neón
@@ -147,7 +140,6 @@ def state_color(state):
 # un color por subagente, el mismo en su tarjeta, su fila y el gráfico de actividad
 NEON_AGENTS = ("#ff2a6d", "#05d9e8", "#39ff14", "#ffd319", "#b967ff", "#01ffc3", "#ff71ce", "#7aa2ff")
 AGENT_COLORS = NEON_AGENTS
-MIN_SLOTS = 3      # casillas de subagentes que se dibujan como mínimo
 # Umbrales del detector de atascos (solo se evalúa mientras la sesión trabaja)
 STUCK_ERRORS = 3     # resultados con error seguidos
 STUCK_REPEAT = 4     # veces seguidas la misma llamada, con los mismos parámetros
@@ -164,7 +156,6 @@ NEWS = {"wait": ("◆", "te espera", "WAIT", True), "stuck": ("⚠", "posible at
         "evo": ("★", "evolucionó", "WAIT", False)}
 CHEATS = ("iddqd", "idkfa")   # sí, esos
 LINGER = 60        # segundos que un subagente terminado sigue a la vista
-SLOT_WIDTH = 24    # ancho mínimo de una casilla; caben tantas como permita la terminal
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
@@ -530,7 +521,6 @@ class Session:
         self.mcp = Counter()
         self.hooks = Counter()
         self.advisor_calls = 0
-        self.advisor_last = 0.0
         self.last = 0.0
         self.pending = {}   # tool_use_id -> (name, label, ts)
         self.agents = []    # lanzamientos vistos en el transcript principal
@@ -590,7 +580,7 @@ class Session:
     def turns_left(self):
         """Turnos que faltan para llenar el contexto, al crecimiento medio de los últimos."""
         marks = list(self.ctx_marks)
-        growth = [b - a for a, b in zip(marks, marks[1:]) if b > a]   # una compactación no cuenta
+        growth = [b - a for a, b in pairwise(marks) if b > a]   # una compactación no cuenta
         if not growth or not self.ctx:
             return None
         return max(0, int((self.window() - self.ctx) / (sum(growth) / len(growth))))
@@ -744,10 +734,9 @@ class Store:
                 target["edits"][path] += 1
             elif path and name == "Read":
                 target["reads"].add(path)
-        if path and name in ("Edit", "Write", "NotebookEdit"):
-            if is_doc(path):
-                path = os.path.join(s.cwd or "", path)
-                s.docs = [p for p in s.docs if p != path] + [path]
+        if path and name in ("Edit", "Write", "NotebookEdit") and is_doc(path):
+            path = os.path.join(s.cwd or "", path)
+            s.docs = [*(p for p in s.docs if p != path), path]
 
     def task_done(self, s, task):
         """Una tarea acaba de pasar a terminada: marca el momento (para el efecto) y avisa."""
@@ -921,7 +910,6 @@ class Store:
                 elif "advisor" in name.lower() or "advisor" in str(b.get("type")):
                     if b.get("type", "").endswith("tool_use"):
                         s.advisor_calls += 1
-                        s.advisor_last = ts
                         self.event(ts, sid, ADVISOR, "advisor", "consulta al advisor")
         elif kind == "user":
             if isinstance(content, str):
@@ -1190,7 +1178,7 @@ class Canvas:
     def branch(self, y, xs, trunk, style, down=True):
         """Línea horizontal que une `trunk` con las columnas `xs`.
         down=True: el tronco llega desde arriba y las ramas bajan."""
-        lo, hi = min(xs + [trunk]), max(xs + [trunk])
+        lo, hi = min(*xs, trunk), max(*xs, trunk)
         self.put(lo, y, "─" * (hi - lo + 1), style)
         ends = ("┌", "┐", "┬") if down else ("└", "┘", "┴")
         for x in xs:
@@ -1235,22 +1223,6 @@ def breath(color, now, offset=0.0):
     return blend(LINE, color, 0.15 + 0.85 * k)
 
 
-def pulse(beats, now, width, span=600):
-    """Actividad de los últimos `span` segundos como línea braille tipo electro.
-    Devuelve (caracteres, lista de cuáles tienen pico)."""
-    n = width * 2
-    counts = [0] * n
-    for t in beats:
-        back = now - t
-        if 0 <= back < span:
-            counts[n - 1 - int(back / span * n)] += 1
-    top = max(counts) or 1
-    levels = [1 + -(-3 * c // top) if c else 1 for c in counts]   # 1 = línea base, 2-4 = pico
-    left, right = (0x40, 0x04, 0x02, 0x01), (0x80, 0x20, 0x10, 0x08)
-    chars = "".join(chr(0x2800 + sum(left[:levels[i]]) + sum(right[:levels[i + 1]])) for i in range(0, n, 2))
-    return chars, [levels[i] > 1 or levels[i + 1] > 1 for i in range(0, n, 2)]
-
-
 def graph_rows(h):
     """Filas que ocupa el gráfico de actividad (leyenda incluida) en un panel de `h` filas."""
     return 4 if h >= 20 else 3
@@ -1271,7 +1243,7 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600, focus=None):
         mine = next((v for v in agents if v["id"] == focus), None)
         if mine is not None:
             others = [(n, blend(LINE, c, 0.3), b) for n, c, b in sources if b is not mine["beats"]]
-            sources = [("◎ " + mine["type"], mine["color"], mine["beats"])] + others
+            sources = [("◎ " + mine["type"], mine["color"], mine["beats"]), *others]
     counts = [[0] * w for _ in sources]
     for k, (_, _, beats) in enumerate(sources):
         for t in beats:
@@ -1323,11 +1295,6 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600, focus=None):
             if col == w - 1 and fresh:   # latido
                 style = "bold #ffffff"
             cv.put(col, base - r, chr(0x2800 + sum(levels[:dots])), style)
-
-
-def hpath(x0, x1, y):
-    step = 1 if x1 >= x0 else -1
-    return [(x, y) for x in range(x0, x1 + step, step)]
 
 
 # ── diseño "diagrama": el lead y un rostro por subagente ────────────────
@@ -1508,7 +1475,7 @@ def eye_color(color):
     """Ojos que contrasten con el color del rostro: rojo, o cian si el rostro ya es rojizo."""
     if not color.startswith("#"):
         return "bright_cyan" if "red" in color else "bright_red"
-    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    r, g = int(color[1:3], 16), int(color[3:5], 16)
     return "#00f0ff" if r > 200 and g < 140 else BLOOD
 
 
@@ -1778,7 +1745,6 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
 
     gap = 2
     cw = (w - indent - gap * (per_row - 1)) // per_row
-    inner_rows = card_h - 2
     rows_shown = -(-len(shown) // per_row)
     spare = 0
     if indent:   # guía tenue desde el lead hasta cada fila
@@ -1814,7 +1780,7 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
         cv.put(ix + iw - len(stat), y + 1, stat, v["color"] if live else DIM)
         lines = []   # (texto, estilo) bajo la cabecera, por orden de importancia
         desc = textwrap.wrap(v["desc"], iw) or [""]
-        lines.append((desc[0] if len(desc) == 1 or inner < 5 else desc[0], FG if live or chosen else DIM))
+        lines.append((desc[0], FG if live or chosen else DIM))
         if len(desc) > 1 and inner >= 5:
             lines.append((trunc(" ".join(desc[1:]), iw), FG if live or chosen else DIM))
         done_ok = bool(v["end"]) and not failed
@@ -1822,8 +1788,8 @@ def diagram(store, s, w, h, now, sel=None, show_all=False, idle_rain=False, focu
             text, tst = agent_now(v)
             lines.insert(1 if inner < 5 else len(lines), (trunc(text, iw), tst))
         if v["response"] and (v["running"] or v["end"]):   # lo último que dijo, si queda sitio
-            for part in textwrap.wrap(" ".join(v["response"].split()), iw - 2)[:max(0, inner - 1 - len(lines))]:
-                lines.append(("“ " + part, blend(LINE, FG, 0.6)))
+            lines.extend(("“ " + part, blend(LINE, FG, 0.6))
+                         for part in textwrap.wrap(" ".join(v["response"].split()), iw - 2)[:max(0, inner - 1 - len(lines))])
         for k, (text, style) in enumerate(lines[:inner - 1]):
             cv.put(ix, y + 2 + k, trunc(text, iw), style)
     return cv.text()
@@ -2356,7 +2322,7 @@ def event_panel(store, e, view, rows, width, now):
                  title_align="left", subtitle_align="right")
     if e is None:
         return Panel(Text("el log está vacío", style=DIM), title="detalle", **frame)
-    ts, sid, style, tag, text, _, ref = e
+    ts, sid, _, tag, text, _, ref = e
     s = store.sessions.get(sid)
     inner = max(20, width - 4)
     lines = []
@@ -3039,7 +3005,7 @@ def help_panel(view, width, max_rows):
     view["top"] = top
     body = Text(no_wrap=True, overflow="ellipsis")
     chunk = lines[top: top + room]
-    for n, line in enumerate(chunk):
+    for line in chunk:
         body.append_text(line)
         body.append("\n")
     more = len(lines) > room
@@ -3073,7 +3039,7 @@ SETTINGS = [
 
 def setting_entries(store):
     """Filas de la ventana: los ajustes fijos y, debajo, un interruptor por cuenta."""
-    rows = list(SETTINGS) + [None, "Cuentas"]
+    rows = [*SETTINGS, None, "Cuentas"]
     for a in store.accounts:
         where = a.path.replace(HOME, "~")
         rows.append((f"account:{a.name}", a.name, "account", None, True,
@@ -3214,7 +3180,7 @@ def news_panel(store, ui, rows, width, now):
     last = len(items) - back
     chunk = items[max(0, last - rows): last]
     for n, item in enumerate(chunk):
-        icon, title, role, _ = NEWS[item["kind"]]
+        icon, _, role, _ = NEWS[item["kind"]]
         body.append(time.strftime("%H:%M:%S", time.localtime(item["ts"])) + " ", style=DIM)
         body.append(f"{icon} ", style=f"bold {THEME[role]}")
         text = f"{item['who']} · {item['text']}" if item["who"] else item["text"]

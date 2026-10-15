@@ -18,3 +18,28 @@ py-modules = ["cc_dash"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cc_dash.__version__" }
+
+# ── chequeo de salud: ./check.sh ──
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "C4", "SIM", "UP", "PERF", "RUF", "PLE", "PLW"]
+ignore = [
+    "E501",     # líneas largas: el código usa hasta ~120 y no vale la pena partirlas
+    "RUF001",   # caracteres unicode "ambiguos": los dibujos de braille y cajas son a propósito
+    "C408",     # dict(...) se usa a propósito en las tablas de temas
+    "PLW1510",  # subprocess.run sin check: los errores se miran por returncode
+    "PLW0603",  # el único global es el tema activo
+    "PLW2901",  # reasignar la variable del bucle
+    "SIM105",   # try/except/pass explícito se lee mejor aquí que contextlib.suppress
+    "B905",     # zip sin strict
+    "SIM108",   # if/else en bloque cuando el ternario quedaría demasiado largo
+]
+
+[tool.vulture]
+paths = ["cc_dash.py"]
+min_confidence = 60
+ignore_names = ["border_style"]   # atributo de rich.Panel
