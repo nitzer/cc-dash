@@ -43,3 +43,7 @@ ignore = [
 paths = ["cc_dash.py"]
 min_confidence = 60
 ignore_names = ["border_style"]   # atributo de rich.Panel
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+testpaths = ["tests"]

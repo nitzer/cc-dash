@@ -21,6 +21,10 @@ $V/ruff check . || fail=1
 echo "── vulture (código muerto)"
 $V/vulture || fail=1
 
+echo "── tests"
+rm -f .coverage
+CC_COV=1 $V/python -m pytest -q -p no:cacheprovider --cov=cc_dash --cov-report= tests || fail=1
+
 echo "── métricas"
 $V/python tools/quality.py "$@" || fail=1
 

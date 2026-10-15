@@ -7,5 +7,6 @@
   "rank_d": 13,
   "rank_ef": 11,
   "long_funcs": 9,
-  "shadowing": 8
+  "shadowing": 8,
+  "coverage": 75
 }

@@ -2,7 +2,7 @@
 
 Uso: python tools/quality.py [--update] [ARCHIVOS…]   (por defecto, todos los .py del proyecto)
 
-Mide la complejidad ciclomática (radon), el índice de mantenibilidad, el tamaño y las
+Mide la cobertura de los tests, la complejidad ciclomática (radon), el índice de mantenibilidad, el tamaño y las
 variables que tapan un nombre de fuera (pylint W0621: ya causó un crash). Si alguna
 métrica empeora respecto a quality-baseline.json, sale con código 1. Con --update, la
 línea base pasa a ser el estado actual (solo hay que hacerlo cuando algo mejora).
@@ -30,6 +30,7 @@ METRICS = {
     "rank_ef": ("funciones con complejidad E o F (31+)", False),
     "long_funcs": ("funciones de más de 80 líneas", False),
     "shadowing": ("nombres locales que tapan uno de fuera (W0621)", False),
+    "coverage": ("% de líneas cubiertas por los tests", True),
 }
 
 
@@ -70,7 +71,17 @@ def measure(files):
     res = subprocess.run([py, "--disable=all", "--enable=redefined-outer-name", "--score=n", *files],
                          capture_output=True, text=True, check=False)
     m["shadowing"] = sum("W0621" in line for line in res.stdout.splitlines())
+    m["coverage"] = coverage()
     return m, sorted(worst, reverse=True)[:8]
+
+
+def coverage():
+    """Total del último `pytest --cov` (lo deja check.sh en .coverage); 0 si no hay datos."""
+    if not os.path.exists(os.path.join(ROOT, ".coverage")):
+        return 0
+    res = subprocess.run([sys.executable, "-m", "coverage", "report", "--format=total"], cwd=ROOT,
+                         capture_output=True, text=True, check=False)
+    return int(res.stdout.strip() or 0) if res.returncode == 0 else 0
 
 
 def main():
