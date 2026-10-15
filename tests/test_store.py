@@ -1,7 +1,7 @@
 """Lo que el dashboard entiende de los transcripts: estado, herramientas, subagentes, atascos."""
 import time
 
-from cc_dash import config, game
+from cc_dash import config, game, model
 from builder import SID, SideTranscript, Transcript
 
 
@@ -211,3 +211,29 @@ def test_game_levels():
     assert g == {"hp": 75, "lvl": 13, "xp": 5, "rounds": 125, "tier": 1}
     assert game.game(0, 0, 200_000)["lvl"] == 1
     assert game.game(10_000, 0, 200_000)["tier"] == 4
+
+
+def test_store_reads_from_any_source():
+    """Store no sabe de disco: interpreta lo que le dé la fuente (así entrarán las máquinas remotas)."""
+    from cc_dash.sources import Batch
+
+    tr = Transcript().prompt("hola").tool("t1", "Bash", command="ls")
+
+    class Memory:
+        transcripts = 1
+
+        def __init__(self):
+            self.pending = [Batch(records=[("remota", r) for r in tr.records],
+                                  live={SID: {"status": "busy", "_account": "remota"}})]
+
+        def read(self, now, accounts):
+            return self.pending.pop() if self.pending else Batch()
+
+        def refresh(self):
+            pass
+
+    store = model.Store([], source=Memory())
+    store.poll(time.time())
+    s = session(store)
+    assert s.account == "remota" and s.tools == 1
+    assert store.state(s) == "busy"

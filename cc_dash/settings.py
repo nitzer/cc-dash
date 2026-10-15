@@ -137,7 +137,7 @@ def apply_config(cfg, ui, store=None):
     """Lleva la configuración al dashboard en marcha y la guarda."""
     if store is not None:
         store.off = set(cfg["disabled"])
-        store.t_glob = store.t_live = 0.0   # que la próxima pasada relea archivos y sesiones
+        store.refresh()   # que la próxima pasada relea archivos y sesiones
     ui["theme"], ui["layout"] = cfg["theme"], cfg["layout"]
     ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
     if not ui["toasts_on"]:

@@ -1,12 +1,12 @@
 {
-  "lines": 4208,
+  "lines": 4258,
   "biggest_file": 964,
   "mi_min": 0.0,
-  "cc_avg": 9.0,
-  "cc_max": 117,
+  "cc_avg": 8.32,
+  "cc_max": 88,
   "rank_d": 13,
-  "rank_ef": 10,
-  "long_funcs": 8,
-  "shadowing": 3,
-  "coverage": 76
+  "rank_ef": 9,
+  "long_funcs": 7,
+  "shadowing": 0,
+  "coverage": 77
 }

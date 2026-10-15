@@ -357,8 +357,8 @@ def agent_stats(t, s, v, now, width, ctx=None):
     def listing(*args, **kw):
         add_listing(t, width, *args, ctx=ctx, **kw)
 
-    def row(label, value, style=C.FG):
-        t.append(f"{label:<11}", style=C.DIM)
+    def row(name, value, style=C.FG):
+        t.append(f"{name:<11}", style=C.DIM)
         t.append(value + "\n", style=style)
 
     failed = bool(v["end"]) and v["status"] != "completed"
@@ -400,8 +400,8 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
     if ui is not None:
         ui["dkind"], ui["dmarks"], ui["ditems"] = "list", ctx["marks"], ctx["items"]
 
-    def row(label, value, style=C.FG):
-        t.append(f"{label:<11}", style=C.DIM)
+    def row(name, value, style=C.FG):
+        t.append(f"{name:<11}", style=C.DIM)
         t.append(value + "\n", style=style)
 
     def listing(*args, **kw):
@@ -728,8 +728,8 @@ def footer(store, s, auto, account, now, sel=False, hint=None, flash=None, width
     t.append((s.cwd or "?").replace(HOME, "~") + " $ ", style=f"bold {C.LEAD}")
     t.append("▌ " if int(now * 2) % 2 else "  ", style=C.FG)
 
-    def field(label, value, color):
-        t.append(f" {label} ", style=C.DIM)
+    def field(name, value, color):
+        t.append(f" {name} ", style=C.DIM)
         t.append(f"[{value}]", style=f"bold {color}")
 
     agents = store.agents(s)

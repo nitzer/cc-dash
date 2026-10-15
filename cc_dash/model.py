@@ -1,22 +1,16 @@
 """Lo que el dashboard entiende de los transcripts: sesiones, subagentes, estado y atascos."""
 
-import glob
 import json
 import os
 import re
 import subprocess
 import time
-from collections import Counter
-from collections import deque
+from collections import Counter, deque
 from itertools import pairwise
-
-try:
-    import termios
-except ImportError:  # Windows
-    termios = None
 
 from .config import limits
 from .repo import git
+from .sources import LocalSource
 from .text import age, block_text, clip, clip_input, clock, is_doc, parse_ts, short_model, short_tool, tool_label
 from .theme import C
 
@@ -122,14 +116,44 @@ class Session:
         return max(0, int((self.window() - self.ctx) / (sum(growth) / len(growth))))
 
 
+def message(o):
+    """(mensaje, contenido) de un registro; vacíos si no los tiene."""
+    msg = o.get("message") if isinstance(o.get("message"), dict) else {}
+    return msg, msg.get("content")
+
+
+def blocks(content):
+    """Los bloques (dict) de un contenido en forma de lista."""
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def lead_message(s, o, msg, usage):
+    """Lo que un mensaje del lead dice de la sesión: modelo, advisor, effort, skill y contexto."""
+    if msg.get("model") and msg["model"] != "<synthetic>":
+        s.model = msg["model"]
+    s.advisor = o.get("advisorModel") or s.advisor
+    s.effort = o.get("effort") or s.effort
+    if o.get("attributionSkill") and o["attributionSkill"] not in s.skills:
+        s.skills[o["attributionSkill"]] = 1
+    if usage:
+        read = usage.get("cache_read_input_tokens") or 0
+        s.ctx = (usage.get("input_tokens") or 0) + read + (usage.get("cache_creation_input_tokens") or 0)
+        s.cache_pct = round(100 * read / s.ctx) if s.ctx else None
+
+
 class Store:
-    def __init__(self, accounts):
+    """Interpreta lo que entrega la fuente de datos (por defecto, el disco de esta máquina)."""
+
+    def __init__(self, accounts, source=None):
         self.accounts = accounts
+        self.source = source or LocalSource()
+        # tipo de registro del transcript -> quién lo interpreta
+        self.records = {"ai-title": self.on_title, "permission-mode": self.on_permission_mode,
+                        "cost-state": self.on_cost, "queue-operation": self.on_queue, "system": self.on_system,
+                        "assistant": self.on_assistant, "user": self.on_user}
         self.off = set()    # nombres de las cuentas deshabilitadas: ni se leen ni se muestran
         self.sessions = {}
         self.log = []       # (ts, sid, style, tag, text)
-        self.offsets = {}
-        self.files = []     # (ruta, nombre de cuenta)
         self.live = {}      # sid -> info de ~/.claude/sessions
         self.git_cache = {}      # carpeta -> (cuándo se consultó, datos | None)
         self.daily = Counter()   # (cuenta, (año, mes, día)) -> tokens de salida
@@ -138,8 +162,6 @@ class Store:
         self.news = deque(maxlen=300)   # registro de novedades: {"ts", "sid", "kind", "text"}
         self.aid_of = {}    # tool_use_id del lanzamiento -> agentId (de *.meta.json)
         self.agent_type = {}
-        self.meta_seen = set()
-        self.t_glob = self.t_live = self.t_tail = 0.0
 
     @property
     def active(self):
@@ -149,92 +171,24 @@ class Store:
     def multi(self):
         return len(self.active) > 1
 
-    # -- lectura incremental de transcripts --
     def poll(self, now):
-        if now - self.t_glob > 3:
-            self.files = [(path, acct.name) for acct in self.active
-                          for path in glob.glob(os.path.join(acct.projects, "**", "*.jsonl"), recursive=True)]
-            self.t_glob = now
-            for path, _ in self.files:
-                if os.sep + "subagents" + os.sep in path and path not in self.meta_seen:
-                    self.read_meta(path)
-        if now - self.t_live > 1:
-            self.read_live()
-            self.t_live = now
-        if now - self.t_tail > 0.5:
-            self.t_tail = now
-            grew = False
-            for path, account in self.files:
-                grew |= self.tail(path, account)
-            if grew:
-                self.log.sort(key=lambda e: e[0])
-                del self.log[:-1000]
+        """Lee lo nuevo de la fuente y lo incorpora."""
+        batch = self.source.read(now, self.active)
+        for aid, meta in batch.meta:
+            if meta.get("toolUseId"):
+                self.aid_of[meta["toolUseId"]] = aid
+            self.agent_type[aid] = meta.get("agentType") or ""
+        if batch.live is not None:
+            self.live = batch.live
+        for account, rec in batch.records:
+            self.ingest(rec, account)
+        if batch.records:
+            self.log.sort(key=lambda e: e[0])
+            del self.log[:-1000]
 
-    def read_meta(self, path):
-        """agent-<id>.meta.json enlaza el transcript del subagente con su lanzamiento."""
-        aid = os.path.basename(path)[len("agent-"):-len(".jsonl")]
-        try:
-            with open(path[:-len(".jsonl")] + ".meta.json") as fh:
-                meta = json.load(fh)
-        except (OSError, ValueError):
-            return
-        self.meta_seen.add(path)
-        if meta.get("toolUseId"):
-            self.aid_of[meta["toolUseId"]] = aid
-        self.agent_type[aid] = meta.get("agentType") or ""
-
-    def tail(self, path, account):
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            return False
-        pos = self.offsets.get(path, 0)
-        if size < pos:
-            pos = 0
-        if size == pos:
-            return False
-        try:
-            with open(path, "rb") as fh:
-                fh.seek(pos)
-                data = fh.read(size - pos)
-        except OSError:
-            return False
-        cut = data.rfind(b"\n")
-        if cut < 0:
-            return False
-        self.offsets[path] = pos + cut + 1
-        for raw in data[:cut].split(b"\n"):
-            if not raw.strip():
-                continue
-            try:
-                rec = json.loads(raw)
-            except ValueError:
-                continue
-            if isinstance(rec, dict):
-                self.ingest(rec, account)
-        return True
-
-    def read_live(self):
-        live = {}
-        for acct in self.active:
-            for path in glob.glob(os.path.join(acct.live_dir, "*.json")):
-                try:
-                    with open(path) as fh:
-                        info = json.load(fh)
-                    pid = int(info["pid"])
-                    sid = info["sessionId"]
-                except (OSError, ValueError, KeyError, TypeError):
-                    continue
-                if termios is not None:  # en Windows os.kill(pid, 0) no es inocuo
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        continue
-                    except PermissionError:
-                        pass
-                info["_account"] = acct.name
-                live[sid] = info
-        self.live = live
+    def refresh(self):
+        """Que la próxima lectura vuelva a buscar archivos y sesiones (p. ej. al activar una cuenta)."""
+        self.source.refresh()
 
     def event(self, ts, sid, role, tag, text, agent=None, ref=None):
         """`role`: papel de color ("TOOL", "ERR"…), no el color, para que el log siga al tema.
@@ -335,6 +289,7 @@ class Store:
         return usage
 
     def ingest(self, o, account):
+        """Incorpora un registro del transcript a su sesión."""
         sid = o.get("sessionId") or o.get("session_id")
         if not sid:
             return
@@ -351,148 +306,166 @@ class Store:
         if o.get("gitBranch") and o["gitBranch"] != "HEAD":
             s.branch = o["gitBranch"]
         side = bool(o.get("isSidechain"))
-        msg = o.get("message") if isinstance(o.get("message"), dict) else {}
-        content = msg.get("content")
-
         if kind == "attachment":
-            att = o.get("attachment") if isinstance(o.get("attachment"), dict) else {}
-            if att.get("type") == "hook_success" and att.get("hookEvent"):
-                s.hooks[att["hookEvent"]] += 1
-            elif att.get("type") == "model" and not side and isinstance(att.get("identity"), dict):
-                s.model_id = att["identity"].get("modelId") or s.model_id
-            return
-        if side and o.get("agentId"):
-            if kind == "assistant":
-                self.ingest_side(s, o["agentId"], o, msg, content, ts)
-            elif kind == "user":
-                for b in content if isinstance(content, list) else []:
-                    if isinstance(b, dict) and b.get("type") == "tool_result":
-                        self.attach(s, b)
-                        if b.get("is_error"):
-                            s.side_info(o["agentId"])["errors"] += 1
-            return
+            self.on_attachment(s, o, side)
+        elif side and o.get("agentId"):
+            self.on_subagent(s, o, kind, ts)
+        else:
+            handler = self.records.get(kind)
+            if handler:
+                handler(s, o, ts, side)
 
-        if kind == "ai-title":
-            s.title = o.get("aiTitle") or s.title
-        elif kind == "permission-mode":
-            s.perm = o.get("permissionMode") or s.perm
-        elif kind == "cost-state":
-            s.cost = o.get("totalCostUSD")
-            s.lines = (o.get("totalLinesAdded") or 0, o.get("totalLinesRemoved") or 0)
-        elif kind == "queue-operation":
-            text = o.get("content") if isinstance(o.get("content"), str) else ""
-            if o.get("operation") == "enqueue" and "<task-notification>" in text[:60]:
-                self.agent_notice(s, text, ts)
-        elif kind == "system" and o.get("subtype") == "turn_duration" and not side:
-            s.turns += 1
-            s.turn_last = o.get("durationMs") or 0
-            s.turn_total += s.turn_last
-            if s.ctx:
-                s.ctx_marks.append(s.ctx)
-            if ts:
-                s.turn_spans.append((ts - s.turn_last / 1000, ts))
-            s.turn_start = None
-            s.pending.clear()
-        elif kind == "assistant":
-            if not side:
-                if msg.get("model") and msg["model"] != "<synthetic>":
-                    s.model = msg["model"]
-                s.advisor = o.get("advisorModel") or s.advisor
-                s.effort = o.get("effort") or s.effort
-                if o.get("attributionSkill") and o["attributionSkill"] not in s.skills:
-                    s.skills[o["attributionSkill"]] = 1
-            usage = self.add_usage(s, o, msg)
-            if usage and not side:
-                read = usage.get("cache_read_input_tokens") or 0
-                s.ctx = (usage.get("input_tokens") or 0) + read + (usage.get("cache_creation_input_tokens") or 0)
-                s.cache_pct = round(100 * read / s.ctx) if s.ctx else None
-            for b in content if isinstance(content, list) else []:
-                if not isinstance(b, dict):
-                    continue
-                name = b.get("name") or ""
-                inp = b.get("input") or {}
-                if b.get("type") == "text" and not side and (b.get("text") or "").strip():
-                    s.add_item({"k": "text", "ts": ts, "text": b["text"].strip()})
-                if b.get("type") == "tool_use":
-                    self.count_tool(s, name, inp, ts)
-                    label = tool_label(name, inp)
-                    if not side:
-                        shown = f"{inp.get('subagent_type') or 'general'}: {label}" if name in AGENT_TOOLS else label
-                        item = s.open_items[b.get("id")] = s.add_item(
-                            {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None,
-                             "more": 0, "err": False, "out": None, "input": clip_input(inp)})
-                        self.track_tasks(s, b.get("id"), name, inp)
-                        key = (name, json.dumps(inp, sort_keys=True, default=str)[:600])
-                        s.rep_n = s.rep_n + 1 if key == s.rep_key else 1
-                        s.rep_key = key
-                    else:
-                        item = None
-                    if name in AGENT_TOOLS and not side:
-                        s.agents.append({
-                            "id": b.get("id"), "aid": None, "start": ts, "end": None,
-                            "type": inp.get("subagent_type") or "general",
-                            "desc": inp.get("description") or "",
-                            "prompt": inp.get("prompt") or "",
-                            "model": inp.get("model") or "",
-                            "result": "", "status": "",
-                        })
-                        self.event(ts, sid, "SWARM", "Agent", f"▶ {label}", b.get("id"),
-                                   {"k": "agent", "id": b.get("id")})
-                    else:
-                        s.pending[b.get("id")] = (short_tool(name), label, ts)
-                        self.event(ts, sid, "DIM" if side else "TOOL",
-                                   ("↳ " if side else "") + short_tool(name), label, ref=item)
-                elif "advisor" in name.lower() or "advisor" in str(b.get("type")):
-                    if b.get("type", "").endswith("tool_use"):
-                        s.advisor_calls += 1
-                        self.event(ts, sid, "ADVISOR", "advisor", "consulta al advisor")
+    def on_attachment(self, s, o, side):
+        att = o.get("attachment") if isinstance(o.get("attachment"), dict) else {}
+        if att.get("type") == "hook_success" and att.get("hookEvent"):
+            s.hooks[att["hookEvent"]] += 1
+        elif att.get("type") == "model" and not side and isinstance(att.get("identity"), dict):
+            s.model_id = att["identity"].get("modelId") or s.model_id
+
+    def on_subagent(self, s, o, kind, ts):
+        """Registro del transcript propio de un subagente."""
+        msg, content = message(o)
+        if kind == "assistant":
+            self.ingest_side(s, o["agentId"], o, msg, content, ts)
         elif kind == "user":
-            if isinstance(content, str):
-                if not side and s.turn_start is None:
-                    s.turn_start = ts
-                if not side and not o.get("isMeta") and not content.lstrip().startswith("<"):
-                    s.pending.clear()
-                    s.err_streak = s.rep_n = 0   # un prompt nuevo empieza de cero
-                    s.rep_key = None
-                    item = s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
-                    self.event(ts, sid, "LEAD", "prompt", "› " + content, ref=item)
-                return
-            result = o.get("toolUseResult") if isinstance(o.get("toolUseResult"), dict) else {}
-            for b in content if isinstance(content, list) else []:
-                if not isinstance(b, dict) or b.get("type") != "tool_result":
-                    continue
-                tid = b.get("tool_use_id")
-                item = self.attach(s, b)
-                created = s.task_new.pop(tid, None)
-                if created:
-                    found = re.search(r"Task #(\S+) created", block_text(b.get("content")))
-                    s.todos[found.group(1) if found else f"n{len(s.todos)}"] = created
-                done = s.pending.pop(tid, None)
-                if b.get("is_error"):
-                    s.errors += 1
-                    s.err_streak += 1
-                    s.err_last = done[0] if done else ""
-                else:
-                    s.err_streak = 0
-                if done and b.get("is_error"):
-                    self.event(ts, sid, "ERR", done[0], "✗ " + (done[1] or "error"), ref=item)
-                if result.get("backgroundTaskId") and not any(a["id"] == tid for a in s.agents):
-                    # un comando que quedó corriendo en segundo plano: termina con un aviso aparte
-                    s.jobs[str(result["backgroundTaskId"])] = {
-                        "tool": done[0] if done else "Bash", "label": done[1] if done else "",
-                        "start": (done[2] if done else 0) or ts, "end": None, "status": ""}
-                for a in s.agents:
-                    if a["id"] != tid:
-                        continue
-                    a["aid"] = result.get("agentId") or a["aid"]
-                    if result.get("resolvedModel"):
-                        a["model"] = short_model(result["resolvedModel"])
-                    # en segundo plano el resultado solo confirma el lanzamiento
-                    if result.get("isAsync") or result.get("status") == "async_launched":
-                        break
-                    if a["end"] is None:
-                        a["result"] = block_text(b.get("content"))
-                        self.finish(s, a, ts, "error" if b.get("is_error") else "completed")
+            for b in blocks(content):
+                if b.get("type") == "tool_result":
+                    self.attach(s, b)
+                    if b.get("is_error"):
+                        s.side_info(o["agentId"])["errors"] += 1
+
+    def on_title(self, s, o, ts, side):
+        s.title = o.get("aiTitle") or s.title
+
+    def on_permission_mode(self, s, o, ts, side):
+        s.perm = o.get("permissionMode") or s.perm
+
+    def on_cost(self, s, o, ts, side):
+        s.cost = o.get("totalCostUSD")
+        s.lines = (o.get("totalLinesAdded") or 0, o.get("totalLinesRemoved") or 0)
+
+    def on_queue(self, s, o, ts, side):
+        text = o.get("content") if isinstance(o.get("content"), str) else ""
+        if o.get("operation") == "enqueue" and "<task-notification>" in text[:60]:
+            self.agent_notice(s, text, ts)
+
+    def on_system(self, s, o, ts, side):
+        """Fin de un turno del lead."""
+        if o.get("subtype") != "turn_duration" or side:
+            return
+        s.turns += 1
+        s.turn_last = o.get("durationMs") or 0
+        s.turn_total += s.turn_last
+        if s.ctx:
+            s.ctx_marks.append(s.ctx)
+        if ts:
+            s.turn_spans.append((ts - s.turn_last / 1000, ts))
+        s.turn_start = None
+        s.pending.clear()
+
+    def on_assistant(self, s, o, ts, side):
+        msg, content = message(o)
+        usage = self.add_usage(s, o, msg)
+        if not side:
+            lead_message(s, o, msg, usage)
+        for b in blocks(content):
+            name = b.get("name") or ""
+            if b.get("type") == "text" and not side and (b.get("text") or "").strip():
+                s.add_item({"k": "text", "ts": ts, "text": b["text"].strip()})
+            if b.get("type") == "tool_use":
+                self.on_tool_use(s, b, ts, side)
+            elif ("advisor" in name.lower() or "advisor" in str(b.get("type"))) \
+                    and b.get("type", "").endswith("tool_use"):
+                s.advisor_calls += 1
+                self.event(ts, s.sid, "ADVISOR", "advisor", "consulta al advisor")
+
+    def on_tool_use(self, s, b, ts, side):
+        """Una herramienta que lanzó el lead (o un subagente, en transcripts antiguos)."""
+        name, inp, tid = b.get("name") or "", b.get("input") or {}, b.get("id")
+        self.count_tool(s, name, inp, ts)
+        label = tool_label(name, inp)
+        item = None
+        if not side:
+            shown = f"{inp.get('subagent_type') or 'general'}: {label}" if name in AGENT_TOOLS else label
+            item = s.open_items[tid] = s.add_item(
+                {"k": "tool", "ts": ts, "name": short_tool(name), "label": shown, "res": None,
+                 "more": 0, "err": False, "out": None, "input": clip_input(inp)})
+            self.track_tasks(s, tid, name, inp)
+            key = (name, json.dumps(inp, sort_keys=True, default=str)[:600])
+            s.rep_n = s.rep_n + 1 if key == s.rep_key else 1
+            s.rep_key = key
+        if name in AGENT_TOOLS and not side:
+            s.agents.append({
+                "id": tid, "aid": None, "start": ts, "end": None,
+                "type": inp.get("subagent_type") or "general",
+                "desc": inp.get("description") or "",
+                "prompt": inp.get("prompt") or "",
+                "model": inp.get("model") or "",
+                "result": "", "status": "",
+            })
+            self.event(ts, s.sid, "SWARM", "Agent", f"▶ {label}", tid, {"k": "agent", "id": tid})
+        else:
+            s.pending[tid] = (short_tool(name), label, ts)
+            self.event(ts, s.sid, "DIM" if side else "TOOL", ("↳ " if side else "") + short_tool(name), label,
+                       ref=item)
+
+    def on_user(self, s, o, ts, side):
+        _, content = message(o)
+        if isinstance(content, str):
+            self.on_prompt(s, o, content, ts, side)
+            return
+        result = o.get("toolUseResult") if isinstance(o.get("toolUseResult"), dict) else {}
+        for b in blocks(content):
+            if b.get("type") == "tool_result":
+                self.on_tool_result(s, b, result, ts)
+
+    def on_prompt(self, s, o, content, ts, side):
+        if side:
+            return
+        if s.turn_start is None:
+            s.turn_start = ts
+        if not o.get("isMeta") and not content.lstrip().startswith("<"):
+            s.pending.clear()
+            s.err_streak = s.rep_n = 0   # un prompt nuevo empieza de cero
+            s.rep_key = None
+            item = s.add_item({"k": "prompt", "ts": ts, "text": content.strip()})
+            self.event(ts, s.sid, "LEAD", "prompt", "› " + content, ref=item)
+
+    def on_tool_result(self, s, b, result, ts):
+        """El resultado de una herramienta del lead: errores, tareas, comandos en segundo plano y subagentes."""
+        tid, failed = b.get("tool_use_id"), bool(b.get("is_error"))
+        item = self.attach(s, b)
+        created = s.task_new.pop(tid, None)
+        if created:
+            found = re.search(r"Task #(\S+) created", block_text(b.get("content")))
+            s.todos[found.group(1) if found else f"n{len(s.todos)}"] = created
+        done = s.pending.pop(tid, None)
+        if failed:
+            s.errors += 1
+            s.err_streak += 1
+            s.err_last = done[0] if done else ""
+            if done:
+                self.event(ts, s.sid, "ERR", done[0], "✗ " + (done[1] or "error"), ref=item)
+        else:
+            s.err_streak = 0
+        a = next((a for a in s.agents if a["id"] == tid), None)
+        if a is not None:
+            self.agent_launched(s, a, b, result, ts)
+        elif result.get("backgroundTaskId"):
+            # un comando que quedó corriendo en segundo plano: termina con un aviso aparte
+            s.jobs[str(result["backgroundTaskId"])] = {
+                "tool": done[0] if done else "Bash", "label": done[1] if done else "",
+                "start": (done[2] if done else 0) or ts, "end": None, "status": ""}
+
+    def agent_launched(self, s, a, b, result, ts):
+        """La respuesta al lanzamiento de un subagente: su id y, si no corre en segundo plano, su resultado."""
+        a["aid"] = result.get("agentId") or a["aid"]
+        if result.get("resolvedModel"):
+            a["model"] = short_model(result["resolvedModel"])
+        # en segundo plano el resultado solo confirma el lanzamiento
+        if not (result.get("isAsync") or result.get("status") == "async_launched") and a["end"] is None:
+            a["result"] = block_text(b.get("content"))
+            self.finish(s, a, ts, "error" if b.get("is_error") else "completed")
 
     def ingest_side(self, s, aid, o, msg, content, ts):
         """Un mensaje del propio subagente (transcript en <sesión>/subagents/)."""

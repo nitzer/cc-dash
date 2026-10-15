@@ -182,7 +182,7 @@ class Dashboard:
             self.announce_evolutions()
         if reload_limits(self.cfg, ui, self.cfg_seen, now) and store.off != set(self.cfg["disabled"]):
             store.off = set(self.cfg["disabled"])
-            store.t_glob = store.t_live = 0.0
+            store.refresh()
         return root
 
     def announce_evolutions(self):

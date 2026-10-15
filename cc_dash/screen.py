@@ -217,7 +217,7 @@ def boot(console, store):
     steps = [
         (f"▚▚ CC-DASH v{__version__} // INIT", f"bold {C.LEAD}"),
         (f"   cuentas ........ {len(store.active)}" + (f" (+{len(store.off)} deshabilitadas)" if store.off else ""), C.FG),
-        (f"   transcripts .... {len(store.files)}", C.FG),
+        (f"   transcripts .... {store.source.transcripts}", C.FG),
         (f"   sesiones ....... {len(store.sessions)} · {len(live)} enlazadas", C.FG),
         (f"   eventos ........ {len(store.log)}", C.FG),
         ("   ENLACE ESTABLECIDO", f"bold {C.TOOL}"),

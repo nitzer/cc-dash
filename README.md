@@ -397,7 +397,8 @@ El código está en el paquete `cc_dash/`, un módulo por responsabilidad:
 
 | módulo | qué hace |
 |---|---|
-| `model` | lo que se entiende de los transcripts: sesiones, subagentes, estado, atascos |
+| `sources` | de dónde salen los datos: `LocalSource` lee las cuentas del disco |
+| `model` | lo que se entiende de los transcripts (un método por tipo de registro): sesiones, subagentes, estado, atascos |
 | `config` | cuentas, `config.toml` y los umbrales vigentes (`limits`) |
 | `theme` | temas y la paleta activa `C` (`C.LEAD`, `C.DIM`…) |
 | `text` | utilidades de texto puras |
