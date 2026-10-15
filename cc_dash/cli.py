@@ -38,7 +38,7 @@ def cmd_accounts(accounts, disabled=()):
     console.print(f"config: {config_path()}", style=C.DIM)
 
 
-def main():
+def parser():
     ap = argparse.ArgumentParser(prog="cc-dash", description="Dashboard en vivo de sesiones de Claude Code.")
     ap.add_argument("--version", action="version", version=f"cc-dash {__version__}")
     ap.add_argument("--once", action="store_true", help="imprime un solo fotograma y sale")
@@ -70,112 +70,36 @@ def main():
     p = sub.add_parser("set", help="cambia un umbral u opción; sin argumentos los lista")
     p.add_argument("key", nargs="?")
     p.add_argument("value", nargs="?")
-    args = ap.parse_args()
+    return ap
 
+
+def main():
+    args = parser().parse_args()
     cfg = load_config()
-    if args.cmd == "config":
-        print(config_path())
-        return
-    if args.cmd == "set":
-        if args.key is None:
-            for key, (default, what) in LIMITS.items():
-                print(f"{key:<14} {cfg[key]:<6} {what} (por defecto {default})")
-            for key, what in SWITCHES.items():
-                print(f"{key:<14} {'true' if cfg[key] else 'false':<6} {what}")
-            for key, (_, what) in TEXTS.items():
-                print(f"{key:<14} {json.dumps(cfg[key], ensure_ascii=False)}  {what}")
-            return
-        if args.value is None:
-            sys.exit("cc-dash: falta el valor; uso: cc-dash set CLAVE VALOR")
-        if args.key in TEXTS:
-            cfg[args.key] = args.value.strip()
-            if args.key == "spec_match":
-                try:
-                    re.compile(cfg[args.key])
-                except re.error as exc:
-                    sys.exit(f"cc-dash: spec_match no es una expresión regular válida: {exc}")
-                cfg[args.key] = cfg[args.key] or SPEC_MATCH
-        elif args.key in LIMITS:
-            if not args.value.isdigit():
-                sys.exit(f"cc-dash: {args.key} necesita un número entero mayor o igual que 0")
-            cfg[args.key] = max(1, int(args.value)) if args.key == "toast_max" else int(args.value)
-        elif args.key in SWITCHES:
-            if args.value.lower() not in ("true", "false", "on", "off", "si", "sí", "no"):
-                sys.exit(f"cc-dash: {args.key} necesita true o false")
-            cfg[args.key] = args.value.lower() in ("true", "on", "si", "sí")
-        else:
-            sys.exit(f"cc-dash: clave desconocida '{args.key}'; `cc-dash set` lista las disponibles")
-        save_config(cfg)
-        print(f"{args.key} = {str(cfg[args.key]).lower() if isinstance(cfg[args.key], bool) else cfg[args.key]}")
-        return
-    if args.cmd == "hook" and args.action is None:
-        run_hook(cfg)
-        return
-    if args.cmd == "changes":
-        show_changes(os.path.abspath(os.path.expanduser(args.file)))
-        return
-    if args.cmd == "view":
-        path = os.path.abspath(os.path.expanduser(args.file))
-        if not os.path.isfile(path):
-            sys.exit(f"cc-dash: {path} no es un archivo")
-        why = open_doc(cfg, path)
-        if why == "tty":
-            sys.exit(subprocess.run(viewer_command(cfg, path), shell=True).returncode)
-        if why:
-            sys.exit(f"cc-dash: {why}")
-        return
-    if args.cmd == "update":
-        update()
-        return
-    if args.cmd == "add":
-        path = os.path.abspath(os.path.expanduser(args.path))
-        if not os.path.isdir(path):
-            sys.exit(f"cc-dash: {path} no es un directorio")
-        cfg["account"] = [a for a in cfg["account"] if a["name"] != args.name]
-        cfg["account"].append({"name": args.name, "path": path})
-        save_config(cfg)
-        print(f"cuenta '{args.name}' → {path}")
-        return
-    if args.cmd == "remove":
-        kept = [a for a in cfg["account"] if a["name"] != args.name]
-        if len(kept) == len(cfg["account"]):
-            sys.exit(f"cc-dash: '{args.name}' no está en {config_path()}")
-        cfg["account"] = kept
-        save_config(cfg)
-        print(f"cuenta '{args.name}' quitada")
-        return
-    if args.cmd == "scan":
-        path = os.path.abspath(os.path.expanduser(args.dir))
-        if not os.path.isdir(path):
-            sys.exit(f"cc-dash: {path} no es un directorio")
-        if path not in cfg["scan"]:
-            cfg["scan"].append(path)
-            save_config(cfg)
-        print(f"escaneando cuentas en {path}")
-        return
+    COMMANDS.get(args.cmd, cmd_dashboard)(args, cfg)
 
+
+def directory(path):
+    """Ruta absoluta de un directorio que tiene que existir."""
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        sys.exit(f"cc-dash: {path} no es un directorio")
+    return path
+
+
+def known_accounts(cfg, names):
+    """Las cuentas detectadas; sale con error si `names` nombra alguna que no existe."""
     accounts = resolve_accounts(cfg)
-    if args.cmd == "accounts":
-        cmd_accounts(accounts, cfg["disabled"])
-        return
-    if args.cmd == "hook":
-        chosen = [a for a in accounts if not args.account or a.name in args.account]
-        manage_hooks(chosen, args.action)
-        return
-    if args.cmd in ("disable", "enable"):
-        if args.name not in {a.name for a in accounts}:
-            sys.exit(f"cc-dash: cuenta desconocida: {args.name} (hay: {', '.join(a.name for a in accounts) or 'ninguna'})")
-        cfg["disabled"] = [n for n in cfg["disabled"] if n != args.name]
-        if args.cmd == "disable":
-            cfg["disabled"].append(args.name)
-        save_config(cfg)
-        print(f"cuenta '{args.name}' {'deshabilitada' if args.cmd == 'disable' else 'activa'}")
-        return
+    known = {a.name for a in accounts}
+    missing = [n for n in names if n not in known]
+    if missing:
+        sys.exit(f"cc-dash: cuenta desconocida: {', '.join(missing)} (hay: {', '.join(sorted(known)) or 'ninguna'})")
+    return accounts
+
+
+def cmd_dashboard(args, cfg):
+    accounts = known_accounts(cfg, args.account or ())
     if args.account:
-        known = {a.name for a in accounts}
-        missing = [n for n in args.account if n not in known]
-        if missing:
-            sys.exit(f"cc-dash: cuenta desconocida: {', '.join(missing)} (hay: {', '.join(sorted(known)) or 'ninguna'})")
         accounts = [a for a in accounts if a.name in args.account]
     if not accounts:
         sys.exit("cc-dash: no hay cuentas; registra una con `cc-dash add NOMBRE RUTA`")
@@ -186,3 +110,118 @@ def main():
     if args.theme:
         cfg["theme"] = args.theme
     run(accounts, args.once, cfg)
+
+
+def cmd_config(args, cfg):
+    print(config_path())
+
+
+def cmd_set(args, cfg):
+    if args.key is None:
+        for key, (default, what) in LIMITS.items():
+            print(f"{key:<14} {cfg[key]:<6} {what} (por defecto {default})")
+        for key, what in SWITCHES.items():
+            print(f"{key:<14} {'true' if cfg[key] else 'false':<6} {what}")
+        for key, (_, what) in TEXTS.items():
+            print(f"{key:<14} {json.dumps(cfg[key], ensure_ascii=False)}  {what}")
+        return
+    if args.value is None:
+        sys.exit("cc-dash: falta el valor; uso: cc-dash set CLAVE VALOR")
+    cfg[args.key] = setting_value(args.key, args.value)
+    save_config(cfg)
+    print(f"{args.key} = {str(cfg[args.key]).lower() if isinstance(cfg[args.key], bool) else cfg[args.key]}")
+
+
+def setting_value(key, value):
+    """El valor de `cc-dash set CLAVE VALOR`, validado según el tipo de la clave."""
+    if key in TEXTS:
+        value = value.strip()
+        if key == "spec_match":
+            try:
+                re.compile(value)
+            except re.error as exc:
+                sys.exit(f"cc-dash: spec_match no es una expresión regular válida: {exc}")
+            value = value or SPEC_MATCH
+        return value
+    if key in LIMITS:
+        if not value.isdigit():
+            sys.exit(f"cc-dash: {key} necesita un número entero mayor o igual que 0")
+        return max(1, int(value)) if key == "toast_max" else int(value)
+    if key in SWITCHES:
+        if value.lower() not in ("true", "false", "on", "off", "si", "sí", "no"):
+            sys.exit(f"cc-dash: {key} necesita true o false")
+        return value.lower() in ("true", "on", "si", "sí")
+    sys.exit(f"cc-dash: clave desconocida '{key}'; `cc-dash set` lista las disponibles")
+
+
+def cmd_hook(args, cfg):
+    if args.action is None:
+        run_hook(cfg)
+        return
+    accounts = resolve_accounts(cfg)
+    manage_hooks([a for a in accounts if not args.account or a.name in args.account], args.action)
+
+
+def cmd_changes(args, cfg):
+    show_changes(os.path.abspath(os.path.expanduser(args.file)))
+
+
+def cmd_view(args, cfg):
+    path = os.path.abspath(os.path.expanduser(args.file))
+    if not os.path.isfile(path):
+        sys.exit(f"cc-dash: {path} no es un archivo")
+    why = open_doc(cfg, path)
+    if why == "tty":
+        sys.exit(subprocess.run(viewer_command(cfg, path), shell=True).returncode)
+    if why:
+        sys.exit(f"cc-dash: {why}")
+
+
+def cmd_update(args, cfg):
+    update()
+
+
+def cmd_add(args, cfg):
+    path = directory(args.path)
+    cfg["account"] = [a for a in cfg["account"] if a["name"] != args.name]
+    cfg["account"].append({"name": args.name, "path": path})
+    save_config(cfg)
+    print(f"cuenta '{args.name}' → {path}")
+
+
+def cmd_remove(args, cfg):
+    kept = [a for a in cfg["account"] if a["name"] != args.name]
+    if len(kept) == len(cfg["account"]):
+        sys.exit(f"cc-dash: '{args.name}' no está en {config_path()}")
+    cfg["account"] = kept
+    save_config(cfg)
+    print(f"cuenta '{args.name}' quitada")
+
+
+def cmd_scan(args, cfg):
+    path = directory(args.dir)
+    if path not in cfg["scan"]:
+        cfg["scan"].append(path)
+        save_config(cfg)
+    print(f"escaneando cuentas en {path}")
+
+
+def cmd_list_accounts(args, cfg):
+    cmd_accounts(resolve_accounts(cfg), cfg["disabled"])
+
+
+def cmd_toggle_account(args, cfg):
+    known_accounts(cfg, [args.name])
+    cfg["disabled"] = [n for n in cfg["disabled"] if n != args.name]
+    if args.cmd == "disable":
+        cfg["disabled"].append(args.name)
+    save_config(cfg)
+    print(f"cuenta '{args.name}' {'deshabilitada' if args.cmd == 'disable' else 'activa'}")
+
+
+# subcomando -> qué hace (sin subcomando: el dashboard)
+COMMANDS = {
+    "config": cmd_config, "set": cmd_set, "hook": cmd_hook, "changes": cmd_changes, "view": cmd_view,
+    "update": cmd_update, "add": cmd_add, "remove": cmd_remove, "scan": cmd_scan,
+    "accounts": cmd_list_accounts, "disable": cmd_toggle_account, "enable": cmd_toggle_account,
+}
