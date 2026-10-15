@@ -73,22 +73,16 @@ def graph_rows(h):
     return 4 if h >= 20 else 3
 
 
+DOTS = (0x40 | 0x80, 0x04 | 0x20, 0x02 | 0x10, 0x01 | 0x08)   # filas de puntos braille, de abajo arriba
+
+
 def activity_graph(cv, y, w, h, s, agents, now, span=600, focus=None):
     """Matriz de puntos con las herramientas usadas: una columna por intervalo, apilada por
     quién la usó (el lead y cada subagente en su color).
 
     Cuanto más uso, más intenso el color; la columna de ahora destella con cada herramienta nueva."""
     rows = h - 1
-    side = Counter(t for v in agents for t in v["beats"])
-    lead = list((Counter(s.beats) - side).elements())
-    sources = [("lead", C.LEAD, lead)] + [(v["type"], v["color"], v["beats"]) for v in agents
-                                        if any(0 <= now - t < span for t in v["beats"]) or v["running"]
-                                        or v["id"] == focus]
-    if focus is not None:   # modo foco: el agente enfocado primero (abajo) y el resto apagado
-        mine = next((v for v in agents if v["id"] == focus), None)
-        if mine is not None:
-            others = [(n, blend(C.LINE, c, 0.3), b) for n, c, b in sources if b is not mine["beats"]]
-            sources = [("◎ " + mine["type"], mine["color"], mine["beats"]), *others]
+    sources = graph_sources(s, agents, now, span, focus)
     counts = [[0] * w for _ in sources]
     for k, (_, _, beats) in enumerate(sources):
         for t in beats:
@@ -97,49 +91,70 @@ def activity_graph(cv, y, w, h, s, agents, now, span=600, focus=None):
                 counts[k][w - 1 - int(back / span * w)] += 1
     totals = [sum(c[x] for c in counts) for x in range(w)]
     top = max(totals) or 1
-    last = max((t for _, _, b in sources for t in b), default=0)
+    graph_legend(cv, y, w, s, sources, now, span, focus)
+    fresh = now - max((t for _, _, b in sources for t in b), default=0) < 1.2
+    base = y + rows
+    for col in range(w):
+        if totals[col]:
+            graph_column(cv, col, base, rows, [(c[col], src[1]) for c, src in zip(counts, sources, strict=True)],
+                         totals[col] / top, fresh and col == w - 1)
+        else:   # línea base de puntos, con una marca de tiempo más clara cada 2 minutos
+            tick = (w - 1 - col) % max(1, round(w / 5)) == 0
+            cv.put(col, base, "⣀", C.DIM if tick else C.LINE)
+
+
+def graph_sources(s, agents, now, span, focus):
+    """(nombre, color, latidos) de quien aparece en el gráfico: el lead y los subagentes activos."""
+    side = Counter(t for v in agents for t in v["beats"])
+    lead = list((Counter(s.beats) - side).elements())
+    sources = [("lead", C.LEAD, lead)] + [(v["type"], v["color"], v["beats"]) for v in agents
+                                        if any(0 <= now - t < span for t in v["beats"]) or v["running"]
+                                        or v["id"] == focus]
+    mine = next((v for v in agents if v["id"] == focus), None) if focus is not None else None
+    if mine is None:
+        return sources
+    # modo foco: el agente enfocado primero (abajo) y el resto apagado
+    others = [(n, blend(C.LINE, c, 0.3), b) for n, c, b in sources if b is not mine["beats"]]
+    return [("◎ " + mine["type"], mine["color"], mine["beats"]), *others]
+
+
+def graph_legend(cv, y, w, s, sources, now, span, focus):
+    """Un latido que se acelera con el ritmo, quién aporta cuánto y el ritmo total."""
     rate = sum(1 for t in (sources[0][2] if focus is not None else s.beats) if 0 <= now - t < 60)
-    # leyenda: un latido que se acelera con el ritmo, quién aporta cuánto y el ritmo total
     beat = (now * (0.8 + min(3.0, rate / 10))) % 1 < 0.22
     x = segs(cv, 0, y, [("◆ " if beat else "◇ ", f"bold {C.LEAD}" if beat else C.LINE), ("ACTIVIDAD ", f"bold {C.FG}"),
                         ("10 min  ", C.DIM)])
     for (name, color, beats) in sources:
         n = sum(1 for t in beats if 0 <= now - t < span)
-        part = f"■ {trunc(name, 14)} {n}  "
-        if x + len(part) > w - 26:
+        if x + len(f"■ {trunc(name, 14)} {n}  ") > w - 26:
             break
         x = segs(cv, x, y, [("■ ", color), (f"{trunc(name, 14)} ", C.FG), (f"{n}  ", C.DIM)])
     right = f"{rate} tools/min" + ("" if focus is not None else f" · {ktok(round(s.token_rate(now)))} tok/min")
     cv.put(max(x, w - len(right)), y, right, C.DIM)
-    fresh = now - last < 1.2
-    base = y + rows
-    levels = (0x40 | 0x80, 0x04 | 0x20, 0x02 | 0x10, 0x01 | 0x08)   # filas de puntos, de abajo arriba
-    for col in range(w):
-        total = totals[col]
-        tick = (w - 1 - col) % max(1, round(w / 5)) == 0   # una marca cada 2 minutos
-        if not total:   # línea base de puntos, con las marcas de tiempo más claras
-            cv.put(col, base, "⣀", C.DIM if tick else C.LINE)
-            continue
-        height = max(1, round(total / top * rows * 4))
-        k = 0.4 + 0.6 * total / top
-        bounds, acc = [], 0
-        for c in counts:
-            acc += c[col]
-            bounds.append(acc / total * height)
-        for r in range(rows):
-            dots = min(4, height - 4 * r)
-            if dots <= 0:
-                break
-            mid = 4 * r + dots / 2
-            color = sources[next(i for i, b in enumerate(bounds) if mid <= b + 1e-9)][1]
-            style = blend(C.LINE, color, k)
-            if 4 * r + dots == height:   # el punto más alto, más claro: la cresta
-                style = blend(style, "#ffffff", 0.25)
-            if k > 0.8:
-                style = f"bold {style}"
-            if col == w - 1 and fresh:   # latido
-                style = "bold #ffffff"
-            cv.put(col, base - r, chr(0x2800 + sum(levels[:dots])), style)
+
+
+def graph_column(cv, col, base, rows, parts, share, flash):
+    """Una columna apilada: `parts` son (cuántas, color) de abajo arriba y `share`, su alto relativo."""
+    total = sum(n for n, _ in parts)
+    height = max(1, round(share * rows * 4))
+    k = 0.4 + 0.6 * share
+    bounds, acc = [], 0
+    for n, _ in parts:
+        acc += n
+        bounds.append(acc / total * height)
+    for r in range(rows):
+        dots = min(4, height - 4 * r)
+        if dots <= 0:
+            break
+        mid = 4 * r + dots / 2
+        style = blend(C.LINE, parts[next(i for i, b in enumerate(bounds) if mid <= b + 1e-9)][1], k)
+        if 4 * r + dots == height:   # el punto más alto, más claro: la cresta
+            style = blend(style, "#ffffff", 0.25)
+        if k > 0.8:
+            style = f"bold {style}"
+        if flash:   # latido
+            style = "bold #ffffff"
+        cv.put(col, base - r, chr(0x2800 + sum(DOTS[:dots])), style)
 
 
 def hp_color(hp):

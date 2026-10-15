@@ -264,54 +264,67 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
     ctx = {"open": ui["open"] if ui is not None else set(), "marks": {}, "items": {}}
     if ui is not None:
         ui["dkind"], ui["dmarks"], ui["ditems"] = "list", ctx["marks"], ctx["items"]
+    session_summary(t, store, s, now)
+    session_listings(t, store, s, width, ctx)
+    # el panel se desplaza con AvPág/RePág cuando las listas no caben
+    body, pos = scrolled(t, ui, rows, cursor=ui is not None and ui["pane"] == "detalle", width=width)
+    return Panel(body, title=label("actividad", "STAT"), title_align="left", box=C.PANEL_BOX, border_style=C.LINE,
+                 subtitle=pos, subtitle_align="right")
 
-    def row(name, value, style=C.FG):
-        t.append(f"{name:<11}", style=C.DIM)
-        t.append(value + "\n", style=style)
 
-    def listing(*args, **kw):
-        add_listing(t, width, *args, ctx=ctx, **kw)
+def info_row(t, name, value, style=C.FG):
+    t.append(f"{name:<11}", style=C.DIM)
+    t.append(value + "\n", style=style)
 
-    row("modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
-                                         s.perm and f"permisos {s.perm}") if x))
+
+def bar_row(t, name, fill, cells, colors, tail):
+    """Fila con una barra de 12 celdas: `cells` y `colors` son (lleno, vacío)."""
+    t.append(f"{name:<11}", style=C.DIM)
+    t.append(cells[0] * fill, style=colors[0])
+    t.append(cells[1] * (12 - fill), style=colors[1])
+    t.append(tail + "\n", style=C.FG)
+
+
+def session_summary(t, store, s, now):
+    """Las filas fijas: modelo, nivel, contexto, tokens, ritmo, turnos, tareas y git."""
+    info_row(t, "modelo", " · ".join(x for x in (short_model(s.model), s.effort and f"effort {s.effort}",
+                                                s.perm and f"permisos {s.perm}") if x))
     g = lead_game(s)
-    t.append(f"{'nivel':<11}", style=C.DIM)
-    t.append(f"LV {g['lvl']} · {g['rounds']} rondas · {g['xp']}/10 para subir"
-             + (f" · {EVO[g['tier']]}" if g["tier"] else "") + "\n", style=C.FG)
+    info_row(t, "nivel", f"LV {g['lvl']} · {g['rounds']} rondas · {g['xp']}/10 para subir"
+             + (f" · {EVO[g['tier']]}" if g["tier"] else ""))
     if s.ctx:
         pct = min(100, round(100 * s.ctx / s.window()))
-        fill = round(pct / 100 * 12)
-        t.append(f"{'HP':<11}", style=C.DIM)
-        t.append("█" * fill, style=C.TOOL if pct < 60 else C.LEAD if pct < 85 else C.ERR)
-        t.append("░" * (12 - fill), style=C.LINE)
         left = s.turns_left()
-        t.append(f" {100 - pct}% libre · {ktok(s.ctx)} de {ktok(s.window())}"
-                 + (f" · ~{left} turnos para llenarse" if left is not None else "") + "\n", style=C.FG)
+        bar_row(t, "HP", round(pct / 100 * 12), "█░", (C.TOOL if pct < 60 else C.LEAD if pct < 85 else C.ERR, C.LINE),
+                f" {100 - pct}% libre · {ktok(s.ctx)} de {ktok(s.window())}"
+                + (f" · ~{left} turnos para llenarse" if left is not None else ""))
     why = store.stuck(s, now)
     if why:
-        row("atasco", "⚠ " + " · ".join(why), C.ERR)
-    usage = []
-    if s.cache_pct is not None:
-        usage.append(f"caché {s.cache_pct}%")
+        info_row(t, "atasco", "⚠ " + " · ".join(why), C.ERR)
+    usage = [f"caché {s.cache_pct}%"] if s.cache_pct is not None else []
     usage.append(f"salida {ktok(s.out_tokens)}")
     if s.cost is not None:
         usage.append(f"${s.cost:.2f}")
-    row("tokens", " · ".join(usage))
+    info_row(t, "tokens", " · ".join(usage))
     today = store.daily[(s.account, time.localtime(now)[:3])]
-    row("ritmo", f"{ktok(round(s.token_rate(now)))} tok/min · hoy {ktok(s.tokens_today(now))} sesión · "
-                 f"{ktok(today)} cuenta")
+    info_row(t, "ritmo", f"{ktok(round(s.token_rate(now)))} tok/min · hoy {ktok(s.tokens_today(now))} sesión · "
+                         f"{ktok(today)} cuenta")
     turns = str(s.turns)
     if s.turns:
         turns += f" · último {age(s.turn_last / 1000)} · total {age(s.turn_total / 1000)}"
-    row("turnos", turns)
+    info_row(t, "turnos", turns)
     tasks = s.progress()
     if tasks:
         done, total, doing = tasks
-        fill = round(done / total * 12)
-        t.append(f"{'tareas':<11}", style=C.DIM)
-        t.append("▰" * fill, style=C.TOOL)
-        t.append("▱" * (12 - fill), style=C.LINE)
-        t.append(f" {done}/{total}" + (f" · ▶ {doing}" if doing else "") + "\n", style=C.FG)
+        bar_row(t, "tareas", round(done / total * 12), "▰▱", (C.TOOL, C.LINE),
+                f" {done}/{total}" + (f" · ▶ {doing}" if doing else ""))
+    code = git_summary(store, s, now)
+    if code:
+        info_row(t, "git", code)
+
+
+def git_summary(store, s, now):
+    """Rama, cambios y commits de la sesión, o lo que se sepa sin git."""
     code = []
     info = store.git_info(s, now)
     if info:
@@ -322,8 +335,14 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
         code.append(f"rama {s.branch}")
     if s.lines and any(s.lines):
         code.append(f"+{s.lines[0]} −{s.lines[1]} líneas")
-    if code:
-        row("git", " · ".join(code))
+    return " · ".join(code)
+
+
+def session_listings(t, store, s, width, ctx):
+    """Las listas desplegables: herramientas, skills, archivos, mcp, subagentes y hooks."""
+    def listing(*args, **kw):
+        add_listing(t, width, *args, ctx=ctx, **kw)
+
     if s.tool_counts:
         listing("tools", s.tool_counts.most_common(), C.TOOL, extra=f"{s.errors} con error" if s.errors else "")
     if s.skills:
@@ -342,10 +361,50 @@ def stats_panel(store, s, now, ui=None, rows=40, width=60):
                 extra=f"{live} en marcha" if live else "")
     if s.hooks:
         listing("hooks", s.hooks.most_common(), C.DIM)
-    # el panel se desplaza con AvPág/RePág cuando las listas no caben
-    body, pos = scrolled(t, ui, rows, cursor=ui is not None and ui["pane"] == "detalle", width=width)
-    return Panel(body, title=label("actividad", "STAT"), title_align="left", box=C.PANEL_BOX, border_style=C.LINE,
-                 subtitle=pos, subtitle_align="right")
+
+
+class TaskRows:
+    """Las filas del panel de tareas, cada una una Text, y cuál conviene tener a la vista."""
+
+    def __init__(self, inner, now):
+        self.inner, self.now = inner, now
+        self.lines = []
+        self.follow = 0   # la tarea en curso
+
+    def row(self, mark, mark_style, text, style, right="", follow=False):
+        if follow:
+            self.follow = len(self.lines)
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(f" {mark} ", style=mark_style)
+        body = trunc(text, self.inner - len(right) - 1)
+        line.append(body, style=style)
+        if right:
+            line.append(" " * max(1, self.inner - len(body) - len(right)) + right, style=C.DIM)
+        self.lines.append(line)
+
+    def section(self, title, summary):
+        if self.lines:
+            self.lines.append(Text(""))
+        head = Text(no_wrap=True, overflow="ellipsis")
+        head.append(title, style=f"bold {C.SWARM}")
+        head.append(f"  {summary}", style=C.DIM)
+        self.lines.append(head)
+
+    def finished(self, mark_ok, text, fresh, right):
+        """Fila de algo terminado: recién terminado lleva un barrido y brilla; después queda tachado."""
+        if fresh >= FRESH:
+            self.row(mark_ok, f"bold {C.TOOL}", text, f"{C.DIM} strike", right)
+            return
+        now = self.now
+        body = trunc(text, self.inner - len(right) - 1)
+        swept = len(body) if fresh >= 0.7 else int(fresh / 0.7 * len(body))
+        glow = f"bold {breath(C.TOOL, now * 3)}"
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(" ✦ " if int(now * 4) % 2 else f" {mark_ok} ", style=glow)
+        line.append(body[:swept], style=f"bold {C.CARD_BG} on {C.TOOL}" if fresh < 0.7 else glow)
+        line.append(body[swept:], style=C.FG)
+        line.append(" " * max(1, self.inner - len(body) - len(right)) + right, style=C.DIM)
+        self.lines.append(line)
 
 
 def tasks_panel(store, s, ui, rows, width, now):
@@ -353,99 +412,22 @@ def tasks_panel(store, s, ui, rows, width, now):
     frame = dict(title_align="left", subtitle_align="right", box=C.PANEL_BOX, border_style=C.TOOL)
     if s is None:
         return Panel(Text("sin sesión", style=C.DIM), title=label("tareas", "TODO"), **frame)
-    inner = max(10, width - 8)
-    alive = store.state(s) != "ended"
-    lines = []      # una Text por fila
-    follow = 0      # fila que conviene tener a la vista: la tarea en curso
-
-    def row(mark, mark_style, text, style, right=""):
-        line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(f" {mark} ", style=mark_style)
-        body = trunc(text, inner - len(right) - 1)
-        line.append(body, style=style)
-        if right:
-            line.append(" " * max(1, inner - len(body) - len(right)) + right, style=C.DIM)
-        lines.append(line)
-
-    def section(title, summary):
-        if lines:
-            lines.append(Text(""))
-        head = Text(no_wrap=True, overflow="ellipsis")
-        head.append(title, style=f"bold {C.SWARM}")
-        head.append(f"  {summary}", style=C.DIM)
-        lines.append(head)
-
-    def finished(mark_ok, text, fresh, right):
-        """Fila de algo terminado: recién terminado lleva un barrido y brilla; después queda tachado."""
-        if fresh < FRESH:
-            body = trunc(text, inner - len(right) - 1)
-            swept = len(body) if fresh >= 0.7 else int(fresh / 0.7 * len(body))
-            glow = f"bold {breath(C.TOOL, now * 3)}"
-            line = Text(no_wrap=True, overflow="ellipsis")
-            line.append(" ✦ " if int(now * 4) % 2 else f" {mark_ok} ", style=glow)
-            line.append(body[:swept], style=f"bold {C.CARD_BG} on {C.TOOL}" if fresh < 0.7 else glow)
-            line.append(body[swept:], style=C.FG)
-            line.append(" " * max(1, inner - len(body) - len(right)) + right, style=C.DIM)
-            lines.append(line)
-        else:
-            row(mark_ok, f"bold {C.TOOL}", text, f"{C.DIM} strike", right)
-
-    # subagentes y comandos en segundo plano: lo que Claude Code llama tareas
-    work = [("agent", v["start"], v) for v in store.agents(s)] + [("job", j["start"], j) for j in s.jobs.values()]
-    work.sort(key=lambda w: w[1] or 0)
-    if work:
-        running = sum(1 for kind, _, w in work if (w["running"] if kind == "agent" else w["end"] is None and alive))
-        section("EN SEGUNDO PLANO", f"{running} en marcha · {len(work) - running} terminadas")
-        for kind, _, w in work:
-            if kind == "agent":
-                text = f"{w['type']}: {w['desc']}"
-                live, end, failed = w["running"], w["end"], bool(w["end"]) and w["status"] != "completed"
-                fresh = now - w["end"] if w["end"] else 1e9
-            else:
-                text = f"{w['tool']}: {w['label']}"
-                live, end, failed = w["end"] is None and alive, w["end"], bool(w["end"]) and w["status"] != "completed"
-                fresh = now - w.get("flash", 0)
-            took = clock((now if live else end) - w["start"]) if (live or end) and w["start"] else ""
-            if live:
-                follow = len(lines)
-                row(SPIN[int(now * 9) % len(SPIN)], f"bold {C.SWARM}", text, f"bold {C.FG}", took)
-            elif failed:
-                row("✗", f"bold {C.ERR}", text, C.ERR, w["status"])
-            elif end:
-                finished("✓", text, fresh, took)
-            else:
-                row("■", C.DIM, text, C.DIM, "interrumpida")
-
-    # la lista de pendientes que escribe el propio agente, si tiene esas herramientas
-    tasks = list(s.todos.values())
-    if tasks:
-        done = sum(1 for t in tasks if t["status"] == "completed")
-        fill = round(done / len(tasks) * 12)
-        section("PENDIENTES", f"{done} de {len(tasks)} hechas")
-        bar = Text(no_wrap=True)
-        bar.append(" " + "▰" * fill, style=C.TOOL)
-        bar.append("▱" * (12 - fill), style=C.LINE)
-        lines.append(bar)
-        for task in tasks:
-            if task["status"] == "completed":
-                finished("✓", task["subject"], now - task.get("flash", 0), "")
-            elif task["status"] == "in_progress":
-                follow = len(lines)
-                row("▶", f"bold {C.LEAD}", task["active"] or task["subject"], f"bold {C.LEAD}")
-            else:
-                row("☐", C.FG, task["subject"], C.FG)
+    out = TaskRows(max(10, width - 8), now)
+    background_rows(out, store, s, now)
+    todo_rows(out, s, now)
+    lines = out.lines
     if not lines:
         note = Text("esta sesión no tiene tareas: no ha lanzado subagentes ni comandos en segundo plano, "
                     "y no lleva una lista de pendientes", style=C.DIM)
         return Panel(note, title=label("tareas", "TODO"), **frame)
-    if not tasks:
+    if not s.todos:
         lines.append(Text(""))
         lines.append(Text(" esta sesión no lleva lista de pendientes", style=C.DIM))
 
     ui["rows"] = rows
     if ui["tasks_of"] != s.sid:   # al cambiar de sesión vuelve a seguir lo que está en curso
         ui["tasks_of"], ui["scroll"] = s.sid, -1
-    top = ui["scroll"] if ui["scroll"] >= 0 else follow - rows // 3
+    top = ui["scroll"] if ui["scroll"] >= 0 else out.follow - rows // 3
     top = max(0, min(top, len(lines) - rows))
     ui["tasks_top"] = top
     body = Text(no_wrap=True, overflow="ellipsis")
@@ -457,6 +439,52 @@ def tasks_panel(store, s, ui, rows, width, now):
     more = len(lines) - top - rows
     pos = f"{top + 1}–{top + len(chunk)} de {len(lines)}" + (" ↓" if more > 0 else "")
     return Panel(body, title=label("tareas", "TODO"), subtitle=pos if len(lines) > rows else None, **frame)
+
+
+def background_rows(out, store, s, now):
+    """Subagentes y comandos en segundo plano: lo que Claude Code llama tareas."""
+    alive = store.state(s) != "ended"
+    work = [(v["start"], f"{v['type']}: {v['desc']}", v["running"], now - v["end"] if v["end"] else 1e9, v)
+            for v in store.agents(s)]
+    work += [(j["start"], f"{j['tool']}: {j['label']}", j["end"] is None and alive, now - j.get("flash", 0), j)
+             for j in s.jobs.values()]
+    if not work:
+        return
+    work.sort(key=lambda w: w[0] or 0)
+    running = sum(1 for w in work if w[2])
+    out.section("EN SEGUNDO PLANO", f"{running} en marcha · {len(work) - running} terminadas")
+    for start, text, live, fresh, w in work:
+        end = w["end"]
+        took = clock((now if live else end) - start) if (live or end) and start else ""
+        if live:
+            out.row(SPIN[int(now * 9) % len(SPIN)], f"bold {C.SWARM}", text, f"bold {C.FG}", took, follow=True)
+        elif end and w["status"] != "completed":
+            out.row("✗", f"bold {C.ERR}", text, C.ERR, w["status"])
+        elif end:
+            out.finished("✓", text, fresh, took)
+        else:
+            out.row("■", C.DIM, text, C.DIM, "interrumpida")
+
+
+def todo_rows(out, s, now):
+    """La lista de pendientes que escribe el propio agente, si tiene esas herramientas."""
+    tasks = list(s.todos.values())
+    if not tasks:
+        return
+    done = sum(1 for t in tasks if t["status"] == "completed")
+    fill = round(done / len(tasks) * 12)
+    out.section("PENDIENTES", f"{done} de {len(tasks)} hechas")
+    bar = Text(no_wrap=True)
+    bar.append(" " + "▰" * fill, style=C.TOOL)
+    bar.append("▱" * (12 - fill), style=C.LINE)
+    out.lines.append(bar)
+    for task in tasks:
+        if task["status"] == "completed":
+            out.finished("✓", task["subject"], now - task.get("flash", 0), "")
+        elif task["status"] == "in_progress":
+            out.row("▶", f"bold {C.LEAD}", task["active"] or task["subject"], f"bold {C.LEAD}", follow=True)
+        else:
+            out.row("☐", C.FG, task["subject"], C.FG)
 
 
 def detail_panel(store, s, ui, rows, width, now):

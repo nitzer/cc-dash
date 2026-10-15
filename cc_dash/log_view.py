@@ -79,6 +79,69 @@ def log_panel(store, focus, events, title, narrowed, rows, width, cursor=None, b
                  border_style=border)
 
 
+class DetailLines:
+    """Las líneas (texto, estilo) del detalle de una entrada, con secciones y texto ajustado al ancho."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.lines = []
+
+    def section(self, name):
+        if self.lines:   # la primera sección no lleva separación
+            self.lines.append(("", ""))
+        self.lines.append((name.upper(), f"bold {C.SWARM}"))
+
+    def add(self, body, st=C.FG):
+        for raw in (body or "").expandtabs(4).splitlines() or [""]:
+            for n, part in enumerate(textwrap.wrap(raw, self.inner - 2, replace_whitespace=False,
+                                                   drop_whitespace=False) or [""]):
+                self.lines.append(("  " + (part.lstrip() if n else part), st))
+
+
+def prompt_detail(out, store, s, ref):
+    out.section("prompt")
+    out.add(ref["text"])
+    return "", C.DIM
+
+
+def tool_detail(out, store, s, ref):
+    if ref["label"]:
+        out.add(ref["label"], "bold")
+    out.section("salida")
+    if ref["out"] is None:
+        out.add("todavía sin resultado" if s and store.state(s) == "busy" else "sin resultado registrado", C.DIM)
+    else:
+        out.add(ref["out"].strip() or "(sin salida)", C.ERR if ref["err"] else C.FG)
+    out.section("entrada")
+    for key, value in ref["input"].items():
+        out.lines.append((f"  {key}", C.DIM))
+        out.add(value)
+    if ref["err"]:
+        return "✗ error", C.ERR
+    return ("✓ terminado", C.TOOL) if ref["out"] is not None else ("en curso", C.SWARM)
+
+
+def agent_detail(out, store, s, ref):
+    v = next((v for v in store.agents(s) if v["id"] == ref["id"]), None) if s else None
+    if not v:
+        return "", C.DIM
+    out.section(f"subagente {v['type']}" + (f" · {v['model']}" if v["model"] else ""))
+    out.add(v["desc"])
+    out.section("prompt")
+    out.add(v["prompt"] or "(prompt vacío)")
+    out.section("respuesta")
+    out.add(v["response"] or ("todavía sin respuesta" if v["running"] else "(sin respuesta registrada)"),
+            C.FG if v["response"] else C.DIM)
+    if v["running"]:
+        return "en marcha", C.SWARM
+    if v["end"] and v["status"] != "completed":
+        return "✗ " + v["status"], C.ERR
+    return ("✓ terminado", C.TOOL) if v["end"] else ("interrumpido", C.DIM)
+
+
+DETAILS = {"prompt": prompt_detail, "tool": tool_detail, "agent": agent_detail}
+
+
 def event_panel(store, e, view, rows, width, now):
     """Recuadro de color con el detalle completo de la entrada del log bajo el cursor."""
     inside = view["pane"] == "out"
@@ -88,60 +151,14 @@ def event_panel(store, e, view, rows, width, now):
         return Panel(Text("el log está vacío", style=C.DIM), title="detalle", **frame)
     ts, sid, _, tag, text, _, ref = e
     s = store.sessions.get(sid)
-    inner = max(20, width - 4)
-    lines = []
-
-    def section(name):
-        if lines:
-            lines.append(("", ""))
-        lines.append((name.upper(), f"bold {C.SWARM}"))
-
-    # `lines` empieza vacía: la primera sección o línea no lleva separación
-
-    def add(body, st=C.FG):
-        for raw in (body or "").expandtabs(4).splitlines() or [""]:
-            for n, part in enumerate(textwrap.wrap(raw, inner - 2, replace_whitespace=False,
-                                                   drop_whitespace=False) or [""]):
-                lines.append(("  " + (part.lstrip() if n else part), st))
-
-    kind = ref["k"] if ref else None
-    status, sst = "", C.DIM
-    if kind == "prompt":
-        section("prompt")
-        add(ref["text"])
-    elif kind == "tool":
-        if ref["err"]:
-            status, sst = "✗ error", C.ERR
-        elif ref["out"] is not None:
-            status, sst = "✓ terminado", C.TOOL
-        else:
-            status, sst = "en curso", C.SWARM
-        if ref["label"]:
-            add(ref["label"], "bold")
-        section("salida")
-        if ref["out"] is None:
-            add("todavía sin resultado" if s and store.state(s) == "busy" else "sin resultado registrado", C.DIM)
-        else:
-            add(ref["out"].strip() or "(sin salida)", C.ERR if ref["err"] else C.FG)
-        section("entrada")
-        for key, value in ref["input"].items():
-            lines.append((f"  {key}", C.DIM))
-            add(value)
-    elif kind == "agent":
-        v = next((v for v in store.agents(s) if v["id"] == ref["id"]), None) if s else None
-        if v:
-            failed = bool(v["end"]) and v["status"] != "completed"
-            status, sst = ("en marcha", C.SWARM) if v["running"] else ("✗ " + v["status"], C.ERR) if failed else \
-                          ("✓ terminado", C.TOOL) if v["end"] else ("interrumpido", C.DIM)
-            section(f"subagente {v['type']}" + (f" · {v['model']}" if v["model"] else ""))
-            add(v["desc"])
-            section("prompt")
-            add(v["prompt"] or "(prompt vacío)")
-            section("respuesta")
-            add(v["response"] or ("todavía sin respuesta" if v["running"] else "(sin respuesta registrada)"),
-                C.FG if v["response"] else C.DIM)
+    out = DetailLines(max(20, width - 4))
+    detail = DETAILS.get(ref["k"]) if ref else None
+    if detail:
+        status, sst = detail(out, store, s, ref)
     else:
-        add(text)
+        out.add(text)
+        status, sst = "", C.DIM
+    lines = out.lines
 
     head = Text(no_wrap=True, overflow="ellipsis")
     head.append(time.strftime("%H:%M:%S", time.localtime(ts)), style="bold")
