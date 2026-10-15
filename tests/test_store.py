@@ -1,7 +1,7 @@
 """Lo que el dashboard entiende de los transcripts: estado, herramientas, subagentes, atascos."""
 import time
 
-import cc_dash as c
+from cc_dash import config, game
 from builder import SID, SideTranscript, Transcript
 
 
@@ -156,7 +156,7 @@ def test_limits_come_from_config(acct, load):
     acct.open_session(status="busy")
     store = load()
     assert store.stuck(session(store), time.time()) == []
-    c.apply_limits({**c.load_config(), "stuck_errors": 1})
+    config.apply_limits({**config.load_config(), "stuck_errors": 1})
     assert store.stuck(session(store), time.time())
 
 
@@ -207,7 +207,7 @@ def test_log_keeps_roles_not_colors(acct, load):
 
 
 def test_game_levels():
-    g = c.game(125, 50_000, 200_000)
+    g = game.game(125, 50_000, 200_000)
     assert g == {"hp": 75, "lvl": 13, "xp": 5, "rounds": 125, "tier": 1}
-    assert c.game(0, 0, 200_000)["lvl"] == 1
-    assert c.game(10_000, 0, 200_000)["tier"] == 4
+    assert game.game(0, 0, 200_000)["lvl"] == 1
+    assert game.game(10_000, 0, 200_000)["tier"] == 4

@@ -2,10 +2,11 @@
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
-import cc_dash as c
+from cc_dash import hooks, repo
 from builder import Transcript
 from test_cli import cc
 
@@ -15,7 +16,7 @@ def sh(cwd, *args):
 
 
 @pytest.fixture
-def repo(tmp_path):
+def git_repo(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     sh(root, "git", "init", "-q")
@@ -27,39 +28,39 @@ def repo(tmp_path):
     return root
 
 
-def test_uncommitted_changes_by_line(repo):
-    path = str(repo / "a.py")
-    (repo / "a.py").write_text("uno\nDOS\ntres\nnueva\n")   # cambia la 2, borra cuatro y añade nueva
-    against, note = c.change_source(path)
+def test_uncommitted_changes_by_line(git_repo):
+    path = str(git_repo / "a.py")
+    (git_repo / "a.py").write_text("uno\nDOS\ntres\nnueva\n")   # cambia la 2, borra cuatro y añade nueva
+    against, note = repo.change_source(path)
     assert against == ["HEAD"] and note == "cambios sin commitear"
-    added, modified, removed = c.changed_lines(path, against)
+    added, modified, removed = repo.changed_lines(path, against)
     assert modified == {2, 4}
     assert removed == {2: ["dos"], 4: ["cuatro"]}   # el texto de antes de cada línea cambiada
-    (repo / "a.py").write_text("uno\ndos\ntres\ncuatro\ncinco\n")
-    added, modified, removed = c.changed_lines(path, c.change_source(path)[0])
+    (git_repo / "a.py").write_text("uno\ndos\ntres\ncuatro\ncinco\n")
+    added, modified, removed = repo.changed_lines(path, repo.change_source(path)[0])
     assert added == {5} and not modified
-    (repo / "a.py").write_text("uno\ntres\ncuatro\n")
-    added, modified, removed = c.changed_lines(path, c.change_source(path)[0])
+    (git_repo / "a.py").write_text("uno\ntres\ncuatro\n")
+    added, modified, removed = repo.changed_lines(path, repo.change_source(path)[0])
     assert removed == {2: ["dos"]}
 
 
-def test_change_source_cases(repo, tmp_path):
-    assert c.change_source(str(repo / "a.py"))[1].startswith("creado en el primer commit")
-    (repo / "b.py").write_text("x\n")
-    assert c.change_source(str(repo / "b.py")) == ([], "archivo nuevo, sin seguimiento")
-    (repo / "a.py").write_text("otro\n")
-    sh(repo, "git", "commit", "-qam", "cambio")
-    against, note = c.change_source(str(repo / "a.py"))
+def test_change_source_cases(git_repo, tmp_path):
+    assert repo.change_source(str(git_repo / "a.py"))[1].startswith("creado en el primer commit")
+    (git_repo / "b.py").write_text("x\n")
+    assert repo.change_source(str(git_repo / "b.py")) == ([], "archivo nuevo, sin seguimiento")
+    (git_repo / "a.py").write_text("otro\n")
+    sh(git_repo, "git", "commit", "-qam", "cambio")
+    against, note = repo.change_source(str(git_repo / "a.py"))
     assert len(against) == 2 and note.startswith("sin cambios pendientes")
     outside = tmp_path / "suelto.py"
     outside.write_text("x")
-    assert c.change_source(str(outside)) == (None, "no está en un repositorio git")
+    assert repo.change_source(str(outside)) == (None, "no está en un repositorio git")
 
 
-def test_git_info(repo, acct, load):
-    acct.write(Transcript(cwd=str(repo)).prompt("hola"))
-    (repo / "a.py").write_text("cambio\n")
-    (repo / "nuevo.txt").write_text("x")
+def test_git_info(git_repo, acct, load):
+    acct.write(Transcript(cwd=str(git_repo)).prompt("hola"))
+    (git_repo / "a.py").write_text("cambio\n")
+    (git_repo / "nuevo.txt").write_text("x")
     store = load()
     s = next(iter(store.sessions.values()))
     info = store.git_info(s, 1e12, refresh=True)
@@ -76,7 +77,7 @@ def test_turn_docs_since_last_prompt(tmp_path, acct):
           .prompt("segundo").tool("t2", "Write", file_path="docs/spec.md")
           .tool("t3", "Edit", file_path="docs/notas.md").tool("t4", "Write", file_path="src/x.py"))
     path = acct.write(tr)
-    assert c.turn_docs(path, str(cwd)) == [str(cwd / "docs" / "spec.md"), str(cwd / "docs" / "notas.md")]
+    assert hooks.turn_docs(path, str(cwd)) == [str(cwd / "docs" / "spec.md"), str(cwd / "docs" / "notas.md")]
 
 
 def test_hook_install_status_remove(tmp_path, acct):
@@ -90,13 +91,13 @@ def test_hook_install_status_remove(tmp_path, acct):
         data = json.load(fh)
     assert data["theme"] == "dark"
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "otro"   # lo ajeno no se toca
-    ours = [g for groups in data["hooks"].values() for g in groups if c.is_ours(g)]
+    ours = [g for groups in data["hooks"].values() for g in groups if hooks.is_ours(g)]
     assert ours
     assert cc(tmp_path, acct, "hook", "status").returncode == 0
     assert cc(tmp_path, acct, "hook", "remove").returncode == 0
     with open(settings) as fh:
         data = json.load(fh)
-    assert not [g for groups in data["hooks"].values() for g in groups if c.is_ours(g)]
+    assert not [g for groups in data["hooks"].values() for g in groups if hooks.is_ours(g)]
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "otro"
 
 
@@ -111,10 +112,10 @@ def test_hook_reports_new_spec(tmp_path, acct):
                CLAUDE_CONFIG_DIR=acct.root, CC_DASH_NO_UPDATE="1")
     env.pop("TMUX", None)
     code = "import sys, cc_dash; sys.argv = ['cc-dash', 'hook']; cc_dash.main()"
-    first = subprocess.run([c.sys.executable, "-c", code], input=event, env=env, capture_output=True, text=True,
+    first = subprocess.run([sys.executable, "-c", code], input=event, env=env, capture_output=True, text=True,
                            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), timeout=30)
     assert first.returncode == 0, first.stderr
     assert "login-spec.md" in first.stdout
-    again = subprocess.run([c.sys.executable, "-c", code], input=event, env=env, capture_output=True, text=True,
+    again = subprocess.run([sys.executable, "-c", code], input=event, env=env, capture_output=True, text=True,
                            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), timeout=30)
     assert again.stdout == ""   # la misma versión no se vuelve a mostrar

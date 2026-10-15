@@ -5,7 +5,7 @@ import time
 import pytest
 from rich.console import Console
 
-import cc_dash as c
+from cc_dash import app, config, theme
 from builder import SID, SideTranscript, Transcript
 
 LAYOUTS = ("lista", "tabla", "tarjetas", "tiempo", "diagrama")
@@ -41,7 +41,7 @@ def scene(acct, load):
 def draw(store, width, height, ui):
     out = io.StringIO()
     console = Console(file=out, width=width, height=height, force_terminal=True, color_system="truecolor")
-    root, _, _ = c.render(console, store, None, None, time.time(), ui)
+    root, _, _ = app.render(console, store, None, None, time.time(), ui)
     console.print(root)
     return out.getvalue()
 
@@ -49,13 +49,13 @@ def draw(store, width, height, ui):
 def plain(store, width, height, ui):
     out = io.StringIO()
     console = Console(file=out, width=width, height=height, color_system=None)
-    console.print(c.render(console, store, None, None, time.time(), ui)[0])
+    console.print(app.render(console, store, None, None, time.time(), ui)[0])
     return out.getvalue()
 
 
 def ui_with(**changes):
-    ui = c.new_ui()
-    ui["cfg"] = c.load_config()
+    ui = app.new_ui()
+    ui["cfg"] = config.load_config()
     ui.update(changes)
     return ui
 
@@ -69,11 +69,11 @@ def test_layouts(scene, layout, size):
         assert "demo" in text
 
 
-@pytest.mark.parametrize("theme", list(c.THEMES))
-def test_themes(scene, theme):
-    c.apply_theme(theme)
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_themes(scene, name):
+    theme.apply_theme(name)
     for layout in LAYOUTS:
-        draw(scene, 120, 45, ui_with(layout=layout, theme=theme))
+        draw(scene, 120, 45, ui_with(layout=layout, theme=name))
 
 
 @pytest.mark.parametrize("window", [
@@ -86,7 +86,7 @@ def test_themes(scene, theme):
     {"news": True},
     {"info": True},
     {"focus": True, "sel": "ag0"},
-    {"toasts": [{"born": None, "kind": k, "who": "demo", "text": "algo pasó"} for k in c.NEWS]},
+    {"toasts": [{"born": None, "kind": k, "who": "demo", "text": "algo pasó"} for k in theme.NEWS]},
 ])
 def test_windows(scene, window):
     for toast in window.get("toasts", ()):

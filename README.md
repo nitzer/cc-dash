@@ -393,6 +393,23 @@ path = "/home/yo/.claude-trabajo"
 
 ## Desarrollo
 
+El código está en el paquete `cc_dash/`, un módulo por responsabilidad:
+
+| módulo | qué hace |
+|---|---|
+| `model` | lo que se entiende de los transcripts: sesiones, subagentes, estado, atascos |
+| `config` | cuentas, `config.toml` y los umbrales vigentes (`limits`) |
+| `theme` | temas y la paleta activa `C` (`C.LEAD`, `C.DIM`…) |
+| `text` | utilidades de texto puras |
+| `repo` | consultas a git |
+| `game` | HP, rondas, niveles y evoluciones |
+| `canvas`, `faces` | lienzo, gráfico de actividad y rostros de braille |
+| `agents_view` | el panel de agentes en sus cinco diseños |
+| `panels`, `settings` | el resto de paneles y la ventana de configuración |
+| `external`, `hooks` | tmux, visores, vista de cambios y el hook de Claude Code |
+| `app` | la pantalla completa y el bucle de teclas |
+| `cli` | subcomandos y arranque |
+
 `./check.sh` revisa la salud del código. La primera vez crea `.venv` con las
 herramientas de `requirements-dev.txt`.
 

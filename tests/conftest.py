@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-import cc_dash as c
+from cc_dash import config, model, theme
 from builder import Account
 
 
@@ -11,11 +11,11 @@ def defaults(tmp_path, monkeypatch):
     """Cada test arranca con el tema y los umbrales por defecto y sin tocar la configuración real."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    c.apply_theme("clasico")
-    c.apply_limits(c.load_config())
+    theme.apply_theme("clasico")
+    config.apply_limits(config.load_config())
     yield
-    c.apply_theme("clasico")
-    c.apply_limits(c.load_config())
+    theme.apply_theme("clasico")
+    config.apply_limits(config.load_config())
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def acct(tmp_path):
 @pytest.fixture
 def load(acct):
     """Lee la cuenta como lo hace el dashboard; llamarla otra vez lee lo nuevo."""
-    store = c.Store([c.Account("prueba", acct.root)])
+    store = model.Store([config.Account("prueba", acct.root)])
     clock = [time.time()]
 
     def poll():

@@ -14,7 +14,7 @@ dependencies = ["rich>=13"]
 cc-dash = "cc_dash:main"
 
 [tool.setuptools]
-py-modules = ["cc_dash"]
+packages = ["cc_dash"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cc_dash.__version__" }
@@ -40,7 +40,7 @@ ignore = [
 ]
 
 [tool.vulture]
-paths = ["cc_dash.py"]
+paths = ["cc_dash"]
 min_confidence = 60
 ignore_names = ["border_style"]   # atributo de rich.Panel
 

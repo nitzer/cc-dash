@@ -13,7 +13,7 @@ V=.venv/bin
 fail=0
 
 echo "── sintaxis (Python 3.11+)"
-$V/python -m py_compile cc_dash.py && echo "ok"
+$V/python -m compileall -q cc_dash && echo "ok"
 
 echo "── ruff"
 $V/ruff check . || fail=1
