@@ -5,7 +5,7 @@ import time
 import pytest
 from rich.console import Console
 
-from cc_dash import app, config, theme
+from cc_dash import config, screen, theme
 from builder import SID, SideTranscript, Transcript
 
 LAYOUTS = ("lista", "tabla", "tarjetas", "tiempo", "diagrama")
@@ -41,7 +41,7 @@ def scene(acct, load):
 def draw(store, width, height, ui):
     out = io.StringIO()
     console = Console(file=out, width=width, height=height, force_terminal=True, color_system="truecolor")
-    root, _, _ = app.render(console, store, None, None, time.time(), ui)
+    root, _, _ = screen.render(console, store, None, None, time.time(), ui)
     console.print(root)
     return out.getvalue()
 
@@ -49,12 +49,12 @@ def draw(store, width, height, ui):
 def plain(store, width, height, ui):
     out = io.StringIO()
     console = Console(file=out, width=width, height=height, color_system=None)
-    console.print(app.render(console, store, None, None, time.time(), ui)[0])
+    console.print(screen.render(console, store, None, None, time.time(), ui)[0])
     return out.getvalue()
 
 
 def ui_with(**changes):
-    ui = app.new_ui()
+    ui = screen.new_ui()
     ui["cfg"] = config.load_config()
     ui.update(changes)
     return ui

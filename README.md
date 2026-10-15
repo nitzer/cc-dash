@@ -407,7 +407,8 @@ El código está en el paquete `cc_dash/`, un módulo por responsabilidad:
 | `agents_view` | el panel de agentes en sus cinco diseños |
 | `panels`, `settings` | el resto de paneles y la ventana de configuración |
 | `external`, `hooks` | tmux, visores, vista de cambios y el hook de Claude Code |
-| `app` | la pantalla completa y el bucle de teclas |
+| `screen` | compone la pantalla completa y decide qué avisar |
+| `app` | el dashboard en marcha: refresco y una cadena de manejadores de teclas |
 | `cli` | subcomandos y arranque |
 
 `./check.sh` revisa la salud del código. La primera vez crea `.venv` con las
