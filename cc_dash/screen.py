@@ -30,7 +30,8 @@ from .theme import C
 
 def new_ui():
     return {"sel": None, "tab": "resp",
-            "scroll": 0, "info": False, "rows": 1, "all": False, "only": False,
+            "scroll": 0, "info": False, "rows": 1, "all": False,
+            "only": True,                 # el log solo muestra la sesión elegida (tecla f: todas)
             "focus": None,                # subagente enfocado (tecla F): todo se centra en él
             "pane": "sesiones",           # panel con el foco del teclado (Tab): sesiones, agentes, log, detalle
             "panes": ["sesiones", "agentes", "log", "detalle"],   # los que se ven ahora

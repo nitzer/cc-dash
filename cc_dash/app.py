@@ -738,6 +738,7 @@ class Dashboard:
 
     def cmd_toggle_only(self):
         self.ui["only"] = not self.ui["only"]
+        self.flash("log: solo la sesión elegida" if self.ui["only"] else "log: todas las sesiones", 2)
         return True
 
     def cmd_jump(self):

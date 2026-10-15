@@ -26,7 +26,7 @@ KEYS = [
     ]),
     ("Session log", [
         ("s", "cursor en el log (Enter abre el detalle)"),
-        ("f", "solo las entradas de la sesión enfocada"),
+        ("f", "log de todas las sesiones o solo de la elegida (por defecto)"),
         ("/", "busca texto (Enter aplica, Esc borra)"),
         ("y", "copia lo que tienes delante"),
     ]),

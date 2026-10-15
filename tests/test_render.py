@@ -118,3 +118,10 @@ def test_side_panel_notes_hidden_sessions(scene, acct, load):
     assert "+1 inactiva hace +12h · t" in text
     shown = plain(store, 140, 45, ui_with(all=True))
     assert "inactiva" not in shown
+
+
+def test_log_shows_only_the_chosen_session_by_default(scene, acct, load):
+    acct.write(Transcript(sid="7" * 8 + SID[8:], start=time.time() - 30).prompt("mensaje de otra sesión"))
+    store = load()
+    assert "mensaje de otra sesión" not in plain(store, 140, 45, ui_with())
+    assert "mensaje de otra sesión" in plain(store, 140, 45, ui_with(only=False))

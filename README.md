@@ -86,6 +86,7 @@ Las principales:
 - `←`/`→`: selecciona un subagente · `r`/`p`: su respuesta o su prompt
 - `F`: foco en el subagente seleccionado (ver abajo)
 - `s`: cursor en el session log; `Enter` abre el detalle de la entrada en una ventana flotante
+- `f`: el session log muestra por defecto solo la sesión elegida; `f` alterna con el de todas
 - `o`: tareas · `n`: novedades · `v`: conversación de la sesión
 - `t`: muestra u oculta los subagentes terminados y las sesiones inactivas
 - `D`: abre el último `.md` que escribió la sesión (un spec, un plan…)
