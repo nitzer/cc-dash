@@ -238,3 +238,22 @@ def test_store_reads_from_any_source():
     s = session(store)
     assert s.account == "remota" and s.tools == 1
     assert store.state(s) == "busy"
+
+
+def test_inactive_sessions_are_hidden(acct, load):
+    old = time.time() - 20 * 3600
+    for n, status in enumerate(("cerrada", "idle", "busy", "waiting")):
+        sid = f"{n}" * 8 + SID[8:]
+        acct.write(Transcript(sid=sid, start=old).prompt(status))
+        if status != "cerrada":
+            acct.open_session(sid=sid, status=status)
+    recent = "9" * 8 + SID[8:]
+    acct.write(Transcript(sid=recent, start=time.time() - 60).prompt("reciente"))
+    store = load()
+    every = store.ordered()
+    names = {s.sid[0] for s in store.shown(every, time.time())}
+    assert names == {"2", "3", "9"}   # se esconden la cerrada y la que espera prompt hace 20 h
+    assert len(store.shown(every, time.time(), show_all=True)) == 5
+    assert "1" in {s.sid[0] for s in store.shown(every, time.time(), keep="1" * 8 + SID[8:])}
+    config.apply_limits({**config.load_config(), "hide_sessions_after": 0})
+    assert len(store.shown(every, time.time())) == 5

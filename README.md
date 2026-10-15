@@ -87,6 +87,7 @@ Las principales:
 - `F`: foco en el subagente seleccionado (ver abajo)
 - `s`: cursor en el session log; `Enter` abre el detalle de la entrada en una ventana flotante
 - `o`: tareas · `n`: novedades · `v`: conversación de la sesión
+- `t`: muestra u oculta los subagentes terminados y las sesiones inactivas
 - `D`: abre el último `.md` que escribió la sesión (un spec, un plan…)
 - `d`: diseño · `T`: tema · `,`: configuración · `q`: sale
 
@@ -162,6 +163,12 @@ foco, igual que cambiar de sesión (`j`/`k`), volver al modo automático (`a`) o
 cambiar de cuenta (`c`).
 
 ## Saltar a una sesión, avisos, pulso y temas
+
+- **Sesiones inactivas:** la lista esconde las sesiones cerradas o en espera
+  de prompt que llevan más de 12 horas sin actividad (`hide_sessions_after`),
+  y al pie dice cuántas quedaron fuera. Nunca esconde una que trabaja, una que
+  te espera ni la que tienes elegida. `t` las muestra, igual que a los
+  subagentes terminados. La cabecera las sigue contando.
 
 - **`Enter`** lleva tu cliente de tmux al panel donde corre la sesión
   enfocada. Hace falta que tanto `cc-dash` como la sesión estén dentro de tmux
@@ -280,6 +287,7 @@ cc-dash set toasts false       # sin toasts (igual que la tecla X)
 | `stuck_tool` | 300 | segundos que una herramienta puede tardar en volver |
 | `stuck_silent` | 180 | segundos trabajando sin actividad |
 | `hide_after` | 60 | segundos que un subagente terminado sigue a la vista |
+| `hide_sessions_after` | 12 | horas sin actividad tras las que se esconde una sesión cerrada o en espera de prompt (0 = nunca) |
 | `toast_seconds` | 8 | segundos que dura un toast |
 | `toast_max` | 4 | toasts visibles a la vez |
 | `toasts`, `alerts`, `effects`, `auto_update` | true | interruptores |
@@ -440,7 +448,8 @@ El código está en el paquete `cc_dash/`, un módulo por responsabilidad:
 | `canvas`, `faces` | lienzo, gráfico de actividad y rostros de braille |
 | `agents_view` | el panel de agentes en sus cinco diseños |
 | `log_view` | el session log y el detalle de cada entrada |
-| `panels`, `settings` | el resto de paneles y la ventana de configuración |
+| `panels`, `settings`, `help_view` | el resto de paneles, la configuración y la ayuda de teclas |
+| `keyboard` | lectura del teclado sin bloquear |
 | `external`, `hooks` | tmux, visores, vista de cambios y el hook de Claude Code |
 | `screen` | compone la pantalla completa y decide qué avisar |
 | `app` | el dashboard en marcha: refresco y una cadena de manejadores de teclas |

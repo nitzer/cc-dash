@@ -1,7 +1,6 @@
 """El dashboard interactivo: composición de la pantalla y bucle de teclas."""
 
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -9,7 +8,6 @@ import time
 from collections import deque
 
 try:
-    import select
     import termios
     import tty
 except ImportError:  # Windows
@@ -18,10 +16,11 @@ except ImportError:  # Windows
 from rich.console import Console
 from rich.live import Live
 
-from .config import LAYOUTS, LIMITS, TEXTS, apply_limits, config_path, load_config, save_config
+from .config import LAYOUTS, LIMITS, TEXTS, apply_limits, config_path, limits, load_config, save_config
 from .external import copy_text, jump, notify, open_doc, self_command, viewer_command
 from .faces import FACES, reached_tier
 from .game import EVO, agent_game, lead_game
+from .keyboard import read_keys, split_keys
 from .log_view import log_cursor, log_events, query
 from .model import Store
 from .repo import change_source
@@ -31,23 +30,6 @@ from .text import is_doc
 from .theme import THEMES, apply_theme
 
 CHEATS = ("iddqd", "idkfa")   # sí, esos
-
-
-def read_keys(fd, timeout):
-    if termios is None:
-        import msvcrt
-        time.sleep(timeout)
-        keys = ""
-        while msvcrt.kbhit():
-            keys += msvcrt.getwch()
-        arrows = {"\xe0H": b"k", "\xe0P": b"j", "\xe0K": b"h", "\xe0M": b"l",
-                  "\xe0I": b"\x1b[5~", "\xe0Q": b"\x1b[6~"}
-        return arrows.get(keys, keys.encode("utf-8", "ignore"))
-    if fd is None:
-        time.sleep(timeout)
-        return b""
-    ready, _, _ = select.select([fd], [], [], timeout)
-    return os.read(fd, 64) if ready else b""
 
 
 def now_mtime():
@@ -75,11 +57,6 @@ def reload_limits(cfg, ui, seen, now):
     ui["toasts_on"], ui["alerts"], ui["effects"] = cfg["toasts"], cfg["alerts"], cfg["effects"]
     apply_limits(cfg)
     return True
-
-
-def split_keys(raw):
-    """Separa lo leído en teclas sueltas: al mantener una tecla llegan varias juntas."""
-    return re.findall(rb"\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z]|[\x00-\xff]", raw, re.S)
 
 
 QUIT = object()   # lo que devuelve un manejador de teclas para salir del dashboard
@@ -179,7 +156,7 @@ class Dashboard:
         self.now = now = time.time()
         store.poll(now)
         root, self.sessions, self.focus = render(self.console, store, self.focus_sid, self.account, now, ui)
-        for sid, kind, text in watch(store, self.sessions, self.seen, now):
+        for sid, kind, text in watch(store, store.ordered(self.account), self.seen, now):   # también las escondidas
             notify(store, ui, sid, kind, text, now)
         if self.focus is not None:
             store.git_info(self.focus, now, refresh=True)
@@ -753,7 +730,10 @@ class Dashboard:
         return True
 
     def cmd_toggle_all(self):
+        """t: subagentes terminados y sesiones inactivas, a la vista o escondidos."""
         self.ui["all"] = not self.ui["all"]
+        self.flash("mostrando terminados y sesiones inactivas" if self.ui["all"]
+                   else f"escondiendo terminados y sesiones sin actividad hace +{limits['hide_sessions_after']}h", 2)
         return True
 
     def cmd_toggle_only(self):

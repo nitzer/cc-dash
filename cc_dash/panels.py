@@ -68,33 +68,40 @@ def header_legend(store):
     return legend
 
 
-def side_panel(store, sessions, focus, rows, now, active=False):
+def side_panel(store, sessions, focus, rows, now, active=False, hidden=0):
+    """La lista de sesiones; `hidden` dice cuántas quedaron escondidas por inactivas."""
     body = Text()
     width = 30
-    fit = max(1, rows // 2)
+    fit = max(1, (rows - (1 if hidden else 0)) // 2)
     at = sessions.index(focus) if focus in sessions else 0
     first = max(0, at - fit + 1)   # la lista se desplaza para no perder el cursor
     for s in sessions[first: first + fit]:
-        state = store.state(s)
-        dot, color = STATES[state][0], state_color(state)
-        why = store.stuck(s, now)
-        if state == "waiting":
-            color = f"bold {breath(C.WAIT, now)}"
-        elif why:
-            dot, color = "⚠", f"bold {breath(C.ERR, now)}"
-        mark = "▸" if s is focus else " "
-        when = age(now - s.last) if s.last else "—"
-        name = trunc(store.label(s), width - 6 - len(when))
-        body.append(f"{mark} ", style=f"bold {C.LEAD}")
-        body.append(f"{dot} ", style=color)
-        body.append(name, style="bold reverse" if s is focus else (C.FG if state != "ended" else C.DIM))
-        body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=C.DIM)
-        text = ("necesita " + store.waiting_for(s) if state == "waiting" else why[0] if why
-                else s.title or s.cwd.replace(HOME, "~") or "—")
-        body.append("    " + trunc(text, width - 4) + "\n",
-                    style=C.WAIT if state == "waiting" else C.ERR if why else C.DIM)
+        session_rows(body, store, s, s is focus, width, now)
+    if hidden:
+        body.append(trunc(f"  +{hidden} inactiva{'s' if hidden != 1 else ''} hace +{limits['hide_sessions_after']}h · t",
+                          width), style=C.DIM)
     return Panel(body, title=label("sesiones"), title_align="left", box=C.PANEL_BOX,
                  border_style=C.LEAD if active else C.LINE)
+
+
+def session_rows(body, store, s, chosen, width, now):
+    """Las dos filas de una sesión en la lista: estado, nombre y hace cuánto; debajo, qué pasa."""
+    state = store.state(s)
+    dot, color = STATES[state][0], state_color(state)
+    why = store.stuck(s, now)
+    if state == "waiting":
+        color = f"bold {breath(C.WAIT, now)}"
+    elif why:
+        dot, color = "⚠", f"bold {breath(C.ERR, now)}"
+    when = age(now - s.last) if s.last else "—"
+    name = trunc(store.label(s), width - 6 - len(when))
+    body.append(f"{'▸' if chosen else ' '} ", style=f"bold {C.LEAD}")
+    body.append(f"{dot} ", style=color)
+    body.append(name, style="bold reverse" if chosen else (C.FG if state != "ended" else C.DIM))
+    body.append(" " * max(1, width - 4 - len(name) - len(when)) + when + "\n", style=C.DIM)
+    text = ("necesita " + store.waiting_for(s) if state == "waiting" else why[0] if why
+            else s.title or s.cwd.replace(HOME, "~") or "—")
+    body.append("    " + trunc(text, width - 4) + "\n", style=C.WAIT if state == "waiting" else C.ERR if why else C.DIM)
 
 
 def session_card(store, s, now):
@@ -642,114 +649,6 @@ class Overlay:
         for line in lines:
             yield from line
             yield Segment.line()
-
-
-# La ayuda (tecla ?): grupos de (teclas, qué hacen)
-KEYS = [
-    ("Sesiones", [
-        ("↑ ↓  ·  j k", "cambia de sesión (con el foco en sesiones)"),
-        ("a", "vuelve al modo automático"),
-        ("Enter", "salta al panel de tmux de la sesión"),
-        ("c", "filtra por cuenta, si hay más de una"),
-        ("v", "conversación de la sesión"),
-        ("D", "abre el último .md que escribió (spec, plan…)"),
-    ]),
-    ("Subagentes", [
-        ("← →  ·  h l", "selecciona un subagente"),
-        ("r  ·  p", "su última respuesta  ·  su prompt"),
-        ("Esc", "suelta la selección"),
-        ("t", "muestra u oculta los ya terminados"),
-        ("F", "foco: log, actividad y gráfico solo de ese agente"),
-    ]),
-    ("Session log", [
-        ("s", "cursor en el log (Enter abre el detalle)"),
-        ("f", "solo las entradas de la sesión enfocada"),
-        ("/", "busca texto (Enter aplica, Esc borra)"),
-        ("y", "copia lo que tienes delante"),
-    ]),
-    ("Panel derecho", [
-        ("o", "tareas: segundo plano y pendientes"),
-        ("n", "registro de novedades"),
-        ("i", "actividad, en terminales estrechas"),
-        ("AvPág RePág", "desplaza el panel  ·  también espacio y b"),
-    ]),
-    ("Avisos", [
-        ("x", "cierra los toasts en pantalla"),
-        ("X", "apaga o enciende los toasts"),
-        ("m", "silencia el pitido y el aviso de tmux"),
-    ]),
-    ("Apariencia y ajustes", [
-        ("d", "diseño del panel de agentes"),
-        ("L", "evoluciones de cada rostro (h/l personaje, j/k nivel)"),
-        ("T", "tema de colores"),
-        ("E", "efectos visuales"),
-        (",", "configuración: ajustes y cuentas"),
-    ]),
-    ("Paneles", [
-        ("Tab  ·  Shift+Tab", "pasa el foco al panel siguiente o anterior"),
-        ("j k", "se mueve dentro del panel con el foco"),
-        ("gg  ·  G", "primero  ·  último"),
-        ("Enter", "agentes: foco · log: detalle · actividad: despliega la lista"),
-        ("e", "actividad: el archivo con sus cambios resaltados"),
-    ]),
-    ("General", [
-        ("?", "esta ayuda"),
-        ("q", "salir"),
-    ]),
-]
-
-
-def help_panel(view, width, max_rows):
-    """Ventana flotante con todas las teclas, en dos columnas si hay ancho."""
-    key_w = 13
-
-    def block(groups, col_w):
-        out = []
-        for title, rows in groups:
-            if out:
-                out.append(Text(""))
-            out.append(Text(title.upper(), style=f"bold {C.SWARM}"))
-            for keys, what in rows:
-                line = Text(no_wrap=True, overflow="ellipsis")
-                line.append(f"{keys:<{key_w}}", style=f"bold {C.LEAD}")
-                line.append(trunc(what, col_w - key_w), style=C.FG)
-                out.append(line)
-        return out
-
-    inner = width - 4
-    if inner >= 96:   # dos columnas, repartiendo los grupos por número de filas
-        half, left, count = sum(len(rows) + 2 for _, rows in KEYS) / 2, [], 0
-        for group in KEYS:
-            size = len(group[1]) + 2
-            if left and count + size / 2 > half:
-                break
-            left.append(group)
-            count += size
-        col_w = (inner - 3) // 2
-        a, b = block(left, col_w), block(KEYS[len(left):], col_w)
-        lines = []
-        for n in range(max(len(a), len(b))):
-            line = Text(no_wrap=True, overflow="ellipsis")
-            line.append_text(a[n] if n < len(a) else Text(""))
-            line.pad_right(max(0, col_w + 3 - len(line.plain)))
-            line.append_text(b[n] if n < len(b) else Text(""))
-            lines.append(line)
-    else:
-        lines = block(KEYS, inner)
-    room = max(3, max_rows - 4)
-    view["rows"] = room
-    top = max(0, min(view["top"], len(lines) - room))
-    view["top"] = top
-    body = Text(no_wrap=True, overflow="ellipsis")
-    chunk = lines[top: top + room]
-    for line in chunk:
-        body.append_text(line)
-        body.append("\n")
-    more = len(lines) > room
-    body.append("\n" + ("j/k desplaza · " if more else "") + "cualquier otra tecla cierra", style=C.DIM)
-    return Panel(body, title=label("teclas", "HELP"), title_align="left", box=box.HEAVY,
-                 border_style=f"bold {C.SWARM}", style=f"on {C.CARD_BG}", width=width,
-                 subtitle=f"{top + 1}–{top + len(chunk)} de {len(lines)}" if more else None, subtitle_align="right")
 
 
 def toast_panel(toast, width, now):

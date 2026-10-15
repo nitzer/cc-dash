@@ -10,13 +10,13 @@ from . import __version__
 from .agents_view import board, diagram
 from .config import limits
 from .faces import gallery_panel
+from .help_view import help_panel
 from .log_view import event_panel, log_cursor, log_events, log_panel, query
 from .panels import (
     Overlay,
     detail_panel,
     footer,
     header,
-    help_panel,
     mode_hint,
     session_card,
     session_panel,
@@ -62,8 +62,9 @@ def new_ui():
 def render(console, store, focus_sid, account, now, ui=None):
     ui = ui if ui is not None else new_ui()
     width, height = console.size
-    sessions = store.ordered(account)
-    by_id = {s.sid: s for s in sessions}
+    everyone = store.ordered(account)
+    sessions = store.shown(everyone, now, ui["all"], focus_sid)
+    by_id = {s.sid: s for s in everyone}
     focus = by_id.get(focus_sid) or store.auto_focus(sessions)
     compact = height < 34
     dh = 15 if compact else 21 if height < 46 else 25
@@ -108,7 +109,7 @@ def render(console, store, focus_sid, account, now, ui=None):
 
     root = Layout()
     root.split_column(
-        Layout(header(store, sessions, account, now, glitch=now < ui["glitch"], god=ui["god"],
+        Layout(header(store, everyone, account, now, glitch=now < ui["glitch"], god=ui["god"],
                       focus=chosen if ui["focus"] else None),
                name="head", size=3),
         Layout(name="mid", size=dh + 2),
@@ -142,10 +143,12 @@ def render(console, store, focus_sid, account, now, ui=None):
         card, card_h = session_card(store, focus, now) if ui["session"] is not None and focus else (None, 0)
         card_h = min(card_h, dh - 4)   # deja sitio para el cursor y una sesión vecina
         if card is not None:
-            side.split_column(Layout(side_panel(store, sessions, focus, dh - card_h, now, active=active)),
+            side.split_column(Layout(side_panel(store, sessions, focus, dh - card_h, now, active=active,
+                                                         hidden=len(everyone) - len(sessions))),
                               Layout(card, size=card_h))
         else:
-            side.update(side_panel(store, sessions, focus, dh, now, active=active))
+            side.update(side_panel(store, sessions, focus, dh, now, active=active,
+                                   hidden=len(everyone) - len(sessions)))
         root["mid"].split_row(side, Layout(diag))
     else:
         root["mid"].update(diag)

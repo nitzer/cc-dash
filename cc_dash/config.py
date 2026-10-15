@@ -46,6 +46,7 @@ LIMITS = {
     "stuck_tool": (300, "segundos que una herramienta puede tardar en volver (0 = no mirar)"),
     "stuck_silent": (180, "segundos trabajando sin actividad (0 = no mirar)"),
     "hide_after": (60, "segundos que un subagente terminado sigue a la vista"),
+    "hide_sessions_after": (12, "horas sin actividad tras las que se esconde una sesión cerrada o en espera (0 = nunca)"),
     "toast_seconds": (8, "segundos que dura un toast"),
     "toast_max": (4, "toasts visibles a la vez"),
 }

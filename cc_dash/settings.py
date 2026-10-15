@@ -27,6 +27,8 @@ SETTINGS = [
     ("stuck_silent", "Sin actividad", "int", 30, 180, "atasco: segundos trabajando sin escribir nada (0 = no mirar)"),
     None,
     ("hide_after", "Ocultar subagente tras", "int", 10, 60, "segundos que un subagente terminado sigue a la vista"),
+    ("hide_sessions_after", "Ocultar sesión tras", "int", 1, 12,
+     "horas sin actividad tras las que se esconde una sesión cerrada o en espera (0 = nunca; t las muestra)"),
     ("toast_seconds", "Duración de un toast", "int", 1, 8, "segundos que un toast sigue en pantalla"),
     ("toast_max", "Toasts a la vez", "int", 1, 4, "cuántos toasts caben apilados"),
 ]

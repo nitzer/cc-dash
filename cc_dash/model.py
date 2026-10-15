@@ -604,6 +604,15 @@ class Store:
         return [v for v in self.agents(s)
                 if show_all or v["running"] or v["id"] == sel or (v["end"] and now - v["end"] < limits["hide_after"])]
 
+    def shown(self, sessions, now, show_all=False, keep=None):
+        """Las sesiones de la lista: se esconden las cerradas o en espera de prompt que llevan más de
+        `hide_sessions_after` horas sin actividad. Nunca una que trabaja, te espera o es `keep`."""
+        hours = limits["hide_sessions_after"]
+        if show_all or not hours:
+            return sessions
+        return [s for s in sessions if s.sid == keep or not s.last or now - s.last < hours * 3600
+                or self.state(s) in ("busy", "waiting")]
+
     def name(self, s):
         info = self.live.get(s.sid) or {}
         return info.get("name") or os.path.basename(s.cwd or "") or s.sid[:8]

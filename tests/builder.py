@@ -89,7 +89,7 @@ class Account:
     def open_session(self, sid=SID, status="idle", pid=None, **info):
         """Marca la sesión como abierta; por defecto con el pid de los tests, que está vivo."""
         pid = pid or os.getpid()
-        with open(os.path.join(self.root, "sessions", f"{pid}.json"), "w") as fh:
+        with open(os.path.join(self.root, "sessions", f"{pid}-{sid[:8]}.json"), "w") as fh:
             json.dump({"pid": pid, "sessionId": sid, "status": status, "startedAt": time.time() * 1000, **info}, fh)
 
     @staticmethod

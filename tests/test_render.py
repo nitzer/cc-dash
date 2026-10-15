@@ -109,3 +109,12 @@ def test_gallery_hides_undiscovered_evolutions(scene):
 def test_empty_dashboard(acct, load):
     text = plain(load(), 120, 45, ui_with())
     assert "CLAUDE CODE" in text
+
+
+def test_side_panel_notes_hidden_sessions(scene, acct, load):
+    acct.write(Transcript(sid="0" * 8 + SID[8:], start=time.time() - 30 * 3600).prompt("vieja"))
+    store = load()
+    text = plain(store, 140, 45, ui_with())
+    assert "+1 inactiva hace +12h · t" in text
+    shown = plain(store, 140, 45, ui_with(all=True))
+    assert "inactiva" not in shown
